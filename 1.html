@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="x-ua-compatible" content="ie=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Basketball Stars</title>
+    
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/777kze777/xh33@main/assets/css/app.css" type="text/css">
+
+    <style>
+        html, body {
+            width: 100%;
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: #000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        #content {
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        canvas {
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+            display: block;
+        }
+
+        #loader {
+            position: absolute;
+            color: #ffffff;
+            font-family: sans-serif;
+            font-size: 20px;
+            z-index: 10;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="content"></div>
+    <div id="loader">Loading...</div>
+
+    <!-- Core Libraries -->
+    <script type="text/javascript" src="https://cdn.jsdelivr.net/gh/777kze777/xh33@main/assets/lib/nape.min.js"></script>
+    <script type="text/javascript" src="https://cdn.jsdelivr.net/gh/777kze777/xh33@main/assets/lib/phaser.min.js"></script>
+    <script type="text/javascript" src="https://cdn.jsdelivr.net/gh/777kze777/xh33@main/assets/lib/phaser-cachebuster.min.js"></script>
+    <script type="text/javascript" src="https://cdn.jsdelivr.net/gh/777kze777/xh33@main/assets/lib/phaser-super-storage.min.js"></script>
+    <script type="text/javascript" src="https://cdn.jsdelivr.net/gh/777kze777/xh33@main/assets/lib/dragonBones.min.js"></script>
+
+    <!-- Cross-Origin Image Fix -->
+    <script>
+        (function() {
+            const originalImage = window.Image;
+            window.Image = function() {
+                const img = new originalImage();
+                img.crossOrigin = "anonymous";
+                return img;
+            };
+            window.Image.prototype = originalImage.prototype;
+        })();
+
+        if (window.PIXI && PIXI.BaseTexture) {
+            const orig = PIXI.BaseTexture.prototype.updateSourceImage;
+            PIXI.BaseTexture.prototype.updateSourceImage = function(source) {
+                if (source) source.crossOrigin = "anonymous";
+                return orig.call(this, source);
+            };
+        }
+    </script>
+
+    <!-- Main Game Script -->
+    <script type="text/javascript" src="https://cdn.jsdelivr.net/gh/777kze777/xh33@main/basketball_stars.min.js?3739db7187d2daa8dcec"></script>
+
+</body>
+</html>
