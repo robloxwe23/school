@@ -25,11 +25,7 @@
   }
   canvas{ display:block; width:100vw; height:100vh; }
 
-  /* ---------- HUD ---------- */
-  #hud{
-    position:absolute; inset:0; pointer-events:none;
-    display:none;
-  }
+  #hud{ position:absolute; inset:0; pointer-events:none; display:none; }
   #topLeft{
     position:absolute; top: calc(15px + env(safe-area-inset-top,0px)); left:15px;
     color:var(--text); font-size:14px; font-weight:800;
@@ -38,76 +34,52 @@
     border:1px solid var(--panel-border); backdrop-filter: blur(6px);
   }
   #topLeft span{ font-size:11px; color:#a8ffb2; font-weight:600; display:block; margin-top:2px;}
+  #viewTag{ color:#ffd166 !important; }
 
   #crosshair{
     position:absolute; top:50%; left:50%; width:6px; height:6px;
     background:#fff; transform:translate(-50%,-50%); border-radius:50%;
     box-shadow:0 0 6px rgba(0,0,0,0.9), 0 0 0 1px rgba(0,0,0,.6); z-index:10;
   }
-
   #hpBar{
     position:absolute; bottom: calc(18px + env(safe-area-inset-bottom,0px)); left:15px;
     width:180px; background: var(--panel-bg); border:1px solid var(--panel-border);
     border-radius:10px; padding:8px 10px; color:#fff; font-weight:800; font-size:12px;
   }
   #hpFill{ height:10px; border-radius:6px; background:linear-gradient(90deg,#5fff7a,#1fb84a); width:100%; margin-top:4px; transition:width .15s; }
-
-  #buildBar{
-    position:absolute; bottom: calc(18px + env(safe-area-inset-bottom,0px)); left:50%;
-    transform:translateX(-50%);
-    display:flex; gap:8px;
-  }
+  #buildBar{ position:absolute; bottom: calc(18px + env(safe-area-inset-bottom,0px)); left:50%; transform:translateX(-50%); display:flex; gap:8px; }
   .slot{
     width:64px; height:64px; background: var(--panel-bg); border:2px solid var(--panel-border);
     border-radius:10px; display:flex; flex-direction:column; align-items:center; justify-content:center;
     color:#fff; font-weight:800; font-size:11px; position:relative; transition: border-color .1s, transform .1s;
   }
-  .slot .key{
-    position:absolute; top:3px; left:5px; font-size:10px; color:#ffd; background:rgba(0,0,0,.5);
-    padding:1px 4px; border-radius:4px;
-  }
+  .slot .key{ position:absolute; top:3px; left:5px; font-size:10px; color:#ffd; background:rgba(0,0,0,.5); padding:1px 4px; border-radius:4px; }
   .slot .icon{ width:26px; height:26px; margin-bottom:4px; }
   .slot.active{ border-color: var(--accent); transform: translateY(-4px) scale(1.05); box-shadow:0 0 14px rgba(255,204,51,.6); }
-
   #instructions{
     position:absolute; bottom: calc(96px + env(safe-area-inset-bottom,0px)); left:50%;
-    transform:translateX(-50%); color:rgba(255,255,255,.92); font-size:12.5px; font-weight:700;
+    transform:translateX(-50%); color:rgba(255,255,255,.92); font-size:12px; font-weight:700;
     text-shadow:1px 1px 3px rgba(0,0,0,.9); background:rgba(0,0,0,.35); padding:6px 14px; border-radius:16px;
     white-space:nowrap;
   }
-
-  #matCount{
-    position:absolute; top: calc(15px + env(safe-area-inset-top,0px)); right:15px;
-    display:flex; gap:8px;
-  }
-  .mat{
-    background: var(--panel-bg); border:1px solid var(--panel-border); border-radius:10px;
-    padding:8px 12px; color:#fff; font-weight:800; font-size:13px; text-align:center; min-width:54px;
-  }
+  #matCount{ position:absolute; top: calc(15px + env(safe-area-inset-top,0px)); right:15px; display:flex; gap:8px; }
+  .mat{ background: var(--panel-bg); border:1px solid var(--panel-border); border-radius:10px; padding:8px 12px; color:#fff; font-weight:800; font-size:13px; text-align:center; min-width:54px; }
   .mat small{ display:block; font-size:9px; opacity:.7; font-weight:600; }
 
-  /* ---------- Ghost placement outline hint (CSS only ring, real ghost is 3D) ---------- */
-
-  /* ---------- MENUS ---------- */
   .overlay{
     position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
     background: radial-gradient(circle at 50% 20%, rgba(60,90,120,.55), rgba(5,8,12,.88));
     z-index:50; flex-direction:column;
   }
   .hidden{ display:none !important; }
-
   #menuCard{
     background: var(--panel-bg); border:1px solid var(--panel-border); border-radius:18px;
     padding:36px 44px; text-align:center; backdrop-filter: blur(10px);
     box-shadow: 0 20px 60px rgba(0,0,0,.5); max-width:90vw;
   }
-  #menuCard h1{
-    margin:0 0 4px 0; font-size:clamp(28px,6vw,46px); color:#fff; letter-spacing:1px;
-    text-shadow: 0 0 18px rgba(255,204,51,.5);
-  }
+  #menuCard h1{ margin:0 0 4px 0; font-size:clamp(28px,6vw,46px); color:#fff; letter-spacing:1px; text-shadow: 0 0 18px rgba(255,204,51,.5); }
   #menuCard h1 span{ color: var(--accent); }
   #menuCard .subtitle{ color:#9fd6ff; font-size:13px; font-weight:700; letter-spacing:2px; text-transform:uppercase; margin-bottom:26px; }
-
   .bigBtn{
     display:block; width:260px; margin:10px auto; padding:14px 0; border:none; border-radius:10px;
     background: linear-gradient(180deg,#ffe066,var(--accent)); color:#22180a; font-weight:900; font-size:17px;
@@ -115,30 +87,14 @@
     letter-spacing: .5px; text-transform:uppercase;
   }
   .bigBtn:active{ transform: translateY(4px); box-shadow:0 2px 0 #b8891a; }
-  .bigBtn.secondary{
-    background: linear-gradient(180deg,#5bd0ff,var(--accent2)); box-shadow:0 6px 0 #1b8dbf, 0 10px 20px rgba(0,0,0,.35);
-    color:#04202b;
-  }
+  .bigBtn.secondary{ background: linear-gradient(180deg,#5bd0ff,var(--accent2)); box-shadow:0 6px 0 #1b8dbf, 0 10px 20px rgba(0,0,0,.35); color:#04202b; }
   .bigBtn.secondary:active{ box-shadow:0 2px 0 #1b8dbf; }
-  .bigBtn.ghost{
-    background: transparent; border:2px solid rgba(255,255,255,.25); color:#fff; box-shadow:none;
-  }
+  .bigBtn.ghost{ background: transparent; border:2px solid rgba(255,255,255,.25); color:#fff; box-shadow:none; }
   .bigBtn.ghost:active{ transform: translateY(2px); }
-
-  #keybindsBox{
-    margin-top:22px; text-align:left; color:#dbeeff; font-size:12.5px; line-height:1.9;
-    background: rgba(0,0,0,.25); border-radius:10px; padding:14px 18px; border:1px solid var(--panel-border);
-  }
+  #keybindsBox{ margin-top:22px; text-align:left; color:#dbeeff; font-size:12.5px; line-height:1.9; background: rgba(0,0,0,.25); border-radius:10px; padding:14px 18px; border:1px solid var(--panel-border); }
   #keybindsBox b{ color: var(--accent); }
   #keybindsBox .row{ display:flex; justify-content:space-between; gap:20px; }
-
   #loadingTip{ margin-top:16px; color:#8fa; font-size:11px; font-style:italic; opacity:.8; }
-
-  #settingsBtn{
-    position:absolute; top: calc(15px + env(safe-area-inset-top,0px)); right:15px; z-index:60;
-    background: var(--panel-bg); border:1px solid var(--panel-border); color:#fff; border-radius:10px;
-    padding:8px 12px; font-weight:800; cursor:pointer;
-  }
 </style>
 </head>
 <body>
@@ -146,14 +102,14 @@
   <div id="crosshair" class="hidden"></div>
 
   <div id="hud">
-    <div id="topLeft">1v1 BUILD BATTLE <span>Web Engine · Sandbox Map</span></div>
+    <div id="topLeft">1v1 BUILD BATTLE <span>Web Engine · Sandbox Map · <b id="viewTag">FIRST PERSON</b></span></div>
     <div id="matCount">
       <div class="mat" id="matWood">150<small>WOOD</small></div>
       <div class="mat" id="matBrick">150<small>BRICK</small></div>
       <div class="mat" id="matMetal">150<small>METAL</small></div>
     </div>
     <div id="hpBar">HP <div id="hpFill"></div></div>
-    <div id="instructions">WASD move · SPACE jump · SHIFT sprint · LMB place/build · RMB destroy · 1-4 select · Q edit-cycle</div>
+    <div id="instructions">WASD move · SPACE jump · SHIFT sprint · V view · LMB build · RMB destroy · 1-4 select</div>
     <div id="buildBar">
       <div class="slot active" data-idx="0"><span class="key">1</span><div class="icon">🧱</div>WALL</div>
       <div class="slot" data-idx="1"><span class="key">2</span><div class="icon">▭</div>FLOOR</div>
@@ -162,7 +118,6 @@
     </div>
   </div>
 
-  <!-- MAIN MENU -->
   <div id="mainMenu" class="overlay">
     <div id="menuCard">
       <h1>1v1<span>.</span>BUILD</h1>
@@ -173,20 +128,17 @@
         <div class="row"><span>Move</span><b>W A S D</b></div>
         <div class="row"><span>Jump</span><b>SPACE</b></div>
         <div class="row"><span>Sprint</span><b>SHIFT</b></div>
+        <div class="row"><span>Toggle View (1st/3rd)</span><b>V</b></div>
         <div class="row"><span>Build / Place</span><b>Left Click</b></div>
         <div class="row"><span>Destroy Piece</span><b>Right Click</b></div>
-        <div class="row"><span>Wall</span><b>1</b></div>
-        <div class="row"><span>Floor</span><b>2</b></div>
-        <div class="row"><span>Ramp</span><b>3</b></div>
-        <div class="row"><span>Pyramid</span><b>4</b></div>
+        <div class="row"><span>Wall / Floor / Ramp / Pyramid</span><b>1 / 2 / 3 / 4</b></div>
         <div class="row"><span>Cycle Piece</span><b>Mouse Wheel</b></div>
         <div class="row"><span>Pause</span><b>ESC</b></div>
       </div>
-      <div id="loadingTip">Tip: pieces snap to a grid, just like the original — build ramps to peek over walls!</div>
+      <div id="loadingTip">Tip: press V to see your character in third person while building!</div>
     </div>
   </div>
 
-  <!-- PAUSE MENU -->
   <div id="pauseMenu" class="overlay hidden">
     <div id="menuCard">
       <h1 style="font-size:32px;">Paused</h1>
@@ -196,7 +148,6 @@
   </div>
 
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/PointerLockControls.js"></script>
 <script>
 (function(){
   "use strict";
@@ -206,12 +157,15 @@
   // ==========================================
   const state = {
     playing:false,
-    selected:0, // 0 wall 1 floor 2 ramp 3 pyramid
+    selected:0,
     materials:{ wood:150, brick:150, metal:150 },
-    hp:100
+    hp:100,
+    view:'first' // 'first' | 'third'
   };
   const BUILD_TYPES = ['wall','floor','ramp','pyramid'];
-  const GRID = 4; // grid size matches piece size, like the OG's 4x4 tiles
+  const GRID = 4;
+  const EYE_HEIGHT = 2.4;
+  const PLAYER_RADIUS = 0.6;
 
   // ==========================================
   // 1. SCENE / RENDERER / CAMERA
@@ -221,8 +175,6 @@
   scene.fog = new THREE.Fog(0x9fd8ef, 40, 220);
 
   const camera = new THREE.PerspectiveCamera(78, window.innerWidth/window.innerHeight, 0.1, 1000);
-  const PLAYER_HEIGHT = 2.5;
-  camera.position.set(0, PLAYER_HEIGHT, 18);
 
   const renderer = new THREE.WebGLRenderer({ antialias:true, powerPreference:"high-performance" });
   renderer.setSize(window.innerWidth, window.innerHeight);
@@ -255,18 +207,20 @@
     brick:  new THREE.MeshStandardMaterial({ color:0xb5573a, roughness:0.9 }),
     metal:  new THREE.MeshStandardMaterial({ color:0x9aa5ad, roughness:0.4, metalness:0.6 }),
     rock:   new THREE.MeshStandardMaterial({ color:0x8d8d86, roughness:1 }),
-    ghost:  new THREE.MeshBasicMaterial({ color:0xffe066, transparent:true, opacity:0.45, depthWrite:false })
+    ghost:  new THREE.MeshBasicMaterial({ color:0xffe066, transparent:true, opacity:0.45, depthWrite:false }),
+    skin:   new THREE.MeshStandardMaterial({ color:0xe0a876, roughness:0.8 }),
+    shirt:  new THREE.MeshStandardMaterial({ color:0x2f6fbf, roughness:0.7 }),
+    pants:  new THREE.MeshStandardMaterial({ color:0x2b2f3a, roughness:0.7 }),
+    shoe:   new THREE.MeshStandardMaterial({ color:0x151515, roughness:0.6 })
   };
-
   const pieceMatByIndex = ()=> [MAT.wood, MAT.woodDark, MAT.wood, MAT.wood][state.selected];
 
   // ==========================================
-  // 4. WORLD (Sandbox map: flat field + scattered props)
+  // 4. WORLD
   // ==========================================
   const buildable = [];
 
-  const floorGeo = new THREE.PlaneGeometry(400,400);
-  const ground = new THREE.Mesh(floorGeo, MAT.ground);
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(400,400), MAT.ground);
   ground.rotation.x = -Math.PI/2;
   ground.receiveShadow = true;
   scene.add(ground);
@@ -277,8 +231,7 @@
   scene.add(grid);
 
   function addRock(x,z,s){
-    const g = new THREE.DodecahedronGeometry(s, 0);
-    const m = new THREE.Mesh(g, MAT.rock);
+    const m = new THREE.Mesh(new THREE.DodecahedronGeometry(s,0), MAT.rock);
     m.position.set(x, s*0.5, z);
     m.rotation.set(Math.random()*Math.PI, Math.random()*Math.PI, 0);
     m.castShadow = true; m.receiveShadow = true;
@@ -298,60 +251,136 @@
     scene.add(m); buildable.push(m);
     return m;
   }
-
-  // scattered props for that OG sandbox feel
-  for(let i=0;i<14;i++){
-    const ang = (i/14)*Math.PI*2;
-    const r = 45 + Math.random()*35;
-    addRock(Math.cos(ang)*r, Math.sin(ang)*r, 1.2+Math.random()*1.6);
-  }
-  for(let i=0;i<10;i++){
-    const ang = Math.random()*Math.PI*2;
-    const r = 20 + Math.random()*50;
-    addTree(Math.cos(ang)*r, Math.sin(ang)*r);
-  }
-  // a couple of premade towers/ramps like classic 1v1 test maps
-  addPlatform(0, 4.5, -20, 10, 10);
-  addPlatform(18, 2.5, 6, 8, 8, MAT.brick);
-  addPlatform(-18, 2.5, 6, 8, 8, MAT.metal);
-
   function addStarterRamp(x,y,z,rotY){
-    const geo = new THREE.BoxGeometry(4,0.4,5.657);
-    const m = new THREE.Mesh(geo, MAT.wood);
+    const m = new THREE.Mesh(new THREE.BoxGeometry(4,0.4,5.657), MAT.wood);
     m.position.set(x,y,z);
     m.rotation.x = -Math.PI/4;
     m.rotation.y = rotY||0;
     m.castShadow = true; m.receiveShadow = true;
     scene.add(m); buildable.push(m);
   }
+
+  for(let i=0;i<14;i++){
+    const ang=(i/14)*Math.PI*2, r=45+Math.random()*35;
+    addRock(Math.cos(ang)*r, Math.sin(ang)*r, 1.2+Math.random()*1.6);
+  }
+  for(let i=0;i<10;i++){
+    const ang=Math.random()*Math.PI*2, r=20+Math.random()*50;
+    addTree(Math.cos(ang)*r, Math.sin(ang)*r);
+  }
+  addPlatform(0, 4.5, -20, 10, 10);
+  addPlatform(18, 2.5, 6, 8, 8, MAT.brick);
+  addPlatform(-18, 2.5, 6, 8, 8, MAT.metal);
   addStarterRamp(0, 2.4, -13.5, 0);
 
   // ==========================================
-  // 5. BUILD PIECE FACTORY (Wall / Floor / Ramp / Pyramid)
+  // 5. CHARACTER (blocky 3D avatar, 1v1.lol style)
+  // ==========================================
+  function buildLimb(w,h,d,mat,pivotAtTop){
+    const group = new THREE.Group();
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(w,h,d), mat);
+    mesh.position.y = pivotAtTop ? -h/2 : h/2;
+    mesh.castShadow = true; mesh.receiveShadow = true;
+    group.add(mesh);
+    return group;
+  }
+
+  const character = new THREE.Group();
+  const LEG_H = 1.5, TORSO_H = 1.7, HEAD_S = 0.9, ARM_H = 1.5;
+
+  const hipY = LEG_H;
+  const leftLeg = buildLimb(0.55, LEG_H, 0.55, MAT.pants, true);
+  leftLeg.position.set(-0.32, hipY, 0);
+  const rightLeg = buildLimb(0.55, LEG_H, 0.55, MAT.pants, true);
+  rightLeg.position.set(0.32, hipY, 0);
+  // shoes
+  const lShoe = new THREE.Mesh(new THREE.BoxGeometry(0.6,0.3,0.75), MAT.shoe); lShoe.position.set(0,-LEG_H+0.15,0.1); lShoe.castShadow=true;
+  const rShoe = new THREE.Mesh(new THREE.BoxGeometry(0.6,0.3,0.75), MAT.shoe); rShoe.position.set(0,-LEG_H+0.15,0.1); rShoe.castShadow=true;
+  leftLeg.add(lShoe); rightLeg.add(rShoe);
+
+  const torso = new THREE.Mesh(new THREE.BoxGeometry(1.35,TORSO_H,0.75), MAT.shirt);
+  torso.position.set(0, hipY + TORSO_H/2, 0);
+  torso.castShadow = true; torso.receiveShadow = true;
+
+  const shoulderY = hipY + TORSO_H;
+  const leftArm = buildLimb(0.45, ARM_H, 0.45, MAT.shirt, true);
+  leftArm.position.set(-0.9, shoulderY, 0);
+  const rightArm = buildLimb(0.45, ARM_H, 0.45, MAT.shirt, true);
+  rightArm.position.set(0.9, shoulderY, 0);
+  const lHand = new THREE.Mesh(new THREE.BoxGeometry(0.4,0.4,0.4), MAT.skin); lHand.position.y=-ARM_H+0.1; lHand.castShadow=true;
+  const rHand = new THREE.Mesh(new THREE.BoxGeometry(0.4,0.4,0.4), MAT.skin); rHand.position.y=-ARM_H+0.1; rHand.castShadow=true;
+  leftArm.add(lHand); rightArm.add(rHand);
+
+  const head = new THREE.Mesh(new THREE.BoxGeometry(HEAD_S,HEAD_S,HEAD_S), MAT.skin);
+  head.position.set(0, shoulderY + HEAD_S/2 + 0.05, 0);
+  head.castShadow = true;
+  // simple face hint
+  const visor = new THREE.Mesh(new THREE.BoxGeometry(0.7,0.18,0.05), new THREE.MeshStandardMaterial({color:0x111111}));
+  visor.position.set(0, shoulderY + HEAD_S/2 + 0.05, HEAD_S/2 + 0.03);
+  head.add(visor);
+
+  character.add(leftLeg, rightLeg, torso, leftArm, rightArm, head);
+  character.castShadow = true;
+
+  // ==========================================
+  // 6. RIG (feet-level object controlling position/yaw)
+  // ==========================================
+  const rig = new THREE.Object3D();
+  rig.position.set(0, 0, 18);
+  scene.add(rig);
+  rig.add(character);
+  character.position.set(0,0,0);
+  character.visible = false; // hidden while first-person
+
+  const pitchObject = new THREE.Object3D();
+  pitchObject.position.y = shoulderY + HEAD_S*0.4;
+  rig.add(pitchObject);
+  pitchObject.add(camera);
+  camera.position.set(0,0,0);
+  camera.rotation.set(0,0,0);
+
+  let yaw = 0, pitch = 0;
+  const PITCH_LIMIT = Math.PI/2 - 0.05;
+
+  // ==========================================
+  // 7. POINTER LOCK (manual, gives full control for 1st/3rd person)
+  // ==========================================
+  let isLocked = false;
+  const canvasEl = renderer.domElement;
+
+  function requestLock(){ canvasEl.requestPointerLock = canvasEl.requestPointerLock || canvasEl.mozRequestPointerLock; canvasEl.requestPointerLock(); }
+  document.addEventListener('pointerlockchange', ()=>{
+    isLocked = document.pointerLockElement === canvasEl;
+    if(!isLocked && state.playing){ pauseMenu.classList.remove('hidden'); }
+  });
+  document.addEventListener('mousemove', (e)=>{
+    if(!isLocked) return;
+    const sens = 0.0022;
+    yaw   -= e.movementX * sens;
+    pitch -= e.movementY * sens;
+    pitch = Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, pitch));
+    rig.rotation.y = yaw;
+    pitchObject.rotation.x = pitch;
+  });
+
+  // ==========================================
+  // 8. BUILD SYSTEM
   // ==========================================
   function makePiece(type, mat){
     let geo;
     switch(type){
-      case 'wall':
-        geo = new THREE.BoxGeometry(GRID, GRID, 0.3);
-        break;
-      case 'floor':
-        geo = new THREE.BoxGeometry(GRID, 0.3, GRID);
-        break;
-      case 'ramp':
-        geo = new THREE.BoxGeometry(GRID, 0.3, GRID*Math.SQRT2);
-        break;
-      case 'pyramid':
-        geo = new THREE.ConeGeometry(GRID*0.72, GRID*0.9, 4);
-        break;
+      case 'wall':    geo = new THREE.BoxGeometry(GRID, GRID, 0.3); break;
+      case 'floor':   geo = new THREE.BoxGeometry(GRID, 0.3, GRID); break;
+      case 'ramp':    geo = new THREE.BoxGeometry(GRID, 0.3, GRID*Math.SQRT2); break;
+      case 'pyramid': geo = new THREE.ConeGeometry(GRID*0.72, GRID*0.9, 4); break;
     }
     const mesh = new THREE.Mesh(geo, mat);
     mesh.castShadow = true; mesh.receiveShadow = true;
     return mesh;
   }
 
-  // Ghost preview mesh (recreated whenever selection changes)
   let ghost = makePiece(BUILD_TYPES[state.selected], MAT.ghost);
+  ghost.visible = false;
   scene.add(ghost);
   function refreshGhost(){
     scene.remove(ghost);
@@ -363,43 +392,52 @@
   function snap(v){ return Math.round(v/GRID)*GRID; }
   function snapAngle(a){ const step = Math.PI/2; return Math.round(a/step)*step; }
 
-  const raycaster = new THREE.Raycaster();
+  const buildRay = new THREE.Raycaster();
   const centerNDC = new THREE.Vector2(0,0);
   let currentHit = null;
+  const builtPieces = [];
+
+  function occupied(px,py,pz){
+    // stability guard: block placing two pieces on the exact same grid cell (prevents z-fighting)
+    for(const p of builtPieces){
+      if(Math.abs(p.position.x-px) < 0.6 && Math.abs(p.position.y-py) < 0.6 && Math.abs(p.position.z-pz) < 0.6) return true;
+    }
+    return false;
+  }
 
   function updateGhostAndHit(){
-    raycaster.setFromCamera(centerNDC, camera);
-    const hits = raycaster.intersectObjects(buildable, false);
-    if(hits.length === 0){ ghost.visible=false; currentHit=null; return; }
+    // building always aims from the true first-person eye/look direction, even in 3rd person
+    buildRay.setFromCamera(centerNDC, camera);
+    const hits = buildRay.intersectObjects(buildable, false);
+    if(hits.length === 0 || hits[0].distance > 40){ ghost.visible=false; currentHit=null; return; }
     const hit = hits[0];
     currentHit = hit;
     const type = BUILD_TYPES[state.selected];
+    const camYaw = rig.rotation.y;
+    const yawSnap = snapAngle(camYaw);
 
-    let px = snap(hit.point.x);
-    let pz = snap(hit.point.z);
-    let py = hit.point.y;
-    const yaw = snapAngle(camera.rotation.y);
+    let px = snap(hit.point.x), pz = snap(hit.point.z), py = hit.point.y;
 
     if(type === 'wall'){
       py = snap(hit.point.y - GRID/2) + GRID/2 + 0.02;
-      ghost.rotation.set(0, yaw, 0);
+      ghost.rotation.set(0, yawSnap, 0);
     } else if(type === 'floor'){
       py = snap(hit.point.y) + 0.16;
-      ghost.rotation.set(0, yaw, 0);
+      ghost.rotation.set(0, yawSnap, 0);
     } else if(type === 'ramp'){
       py = snap(hit.point.y) + GRID/2 - 0.1;
-      ghost.rotation.set(-Math.PI/4, yaw, 0);
+      ghost.rotation.set(-Math.PI/4, yawSnap, 0);
     } else if(type === 'pyramid'){
       py = snap(hit.point.y) + (GRID*0.9)/2 + 0.05;
-      ghost.rotation.set(0, yaw, 0);
+      ghost.rotation.set(0, yawSnap, 0);
     }
 
-    ghost.position.set(px, py, pz);
-    ghost.visible = true;
+    ghost.position.set(px,py,pz);
+    ghost.visible = !occupied(px,py,pz);
   }
 
   function placePiece(){
-    if(!currentHit || !controls.isLocked) return;
+    if(!currentHit || !isLocked || !ghost.visible) return;
     const type = BUILD_TYPES[state.selected];
     const costKey = type==='pyramid' ? 'metal' : (type==='ramp' ? 'brick' : 'wood');
     if(state.materials[costKey] < 10){ flashLowMats(); return; }
@@ -414,36 +452,167 @@
     builtPieces.push(mesh);
   }
 
-  const builtPieces = [];
   function destroyPiece(){
-    if(!controls.isLocked) return;
-    raycaster.setFromCamera(centerNDC, camera);
-    const hits = raycaster.intersectObjects(builtPieces, false);
-    if(hits.length===0) return;
+    if(!isLocked) return;
+    buildRay.setFromCamera(centerNDC, camera);
+    const hits = buildRay.intersectObjects(builtPieces, false);
+    if(hits.length===0 || hits[0].distance > 20) return;
     const obj = hits[0].object;
     scene.remove(obj);
-    const bi = buildable.indexOf(obj); if(bi>-1) buildable.splice(bi,1);
-    const pi = builtPieces.indexOf(obj); if(pi>-1) builtPieces.splice(pi,1);
-    const type = BUILD_TYPES[state.selected];
+    let bi = buildable.indexOf(obj); if(bi>-1) buildable.splice(bi,1);
+    let pi = builtPieces.indexOf(obj); if(pi>-1) builtPieces.splice(pi,1);
     state.materials.wood = Math.min(999, state.materials.wood+5);
     updateMatHud();
   }
 
   function flashLowMats(){
-    const el = document.getElementById('buildBar');
-    el.animate([{filter:'brightness(2) hue-rotate(-40deg)'},{filter:'brightness(1)'}], {duration:220});
+    document.getElementById('buildBar').animate([{filter:'brightness(2) hue-rotate(-40deg)'},{filter:'brightness(1)'}], {duration:220});
   }
 
   // ==========================================
-  // 6. CONTROLS (movement + pointer lock)
+  // 9. MOVEMENT + COLLISION (stability pass)
   // ==========================================
-  const controls = new THREE.PointerLockControls(camera, document.body);
-
   const move = { f:false,b:false,l:false,r:false,sprint:false };
   const velocity = new THREE.Vector3();
-  const direction = new THREE.Vector3();
   let grounded = true;
+  let groundY = 0;
 
+  const downRay = new THREE.Raycaster();
+  const fwdRay = new THREE.Raycaster();
+  downRay.far = 60; fwdRay.far = PLAYER_RADIUS + 0.15;
+
+  function sampleGroundY(x,z,fromY){
+    downRay.set(new THREE.Vector3(x, fromY+6, z), new THREE.Vector3(0,-1,0));
+    const hits = downRay.intersectObjects(buildable, false);
+    if(hits.length) return hits[0].point.y;
+    return 0;
+  }
+
+  function collideAxis(px,pz,dx,dz,chestY){
+    // cast a short ray in the movement direction; if blocked, zero that component
+    const len = Math.hypot(dx,dz);
+    if(len < 1e-5) return {x:dx, z:dz};
+    const dir = new THREE.Vector3(dx/len, 0, dz/len);
+    fwdRay.set(new THREE.Vector3(px, chestY, pz), dir);
+    const hits = fwdRay.intersectObjects(buildable, false);
+    if(hits.length && hits[0].distance < PLAYER_RADIUS){
+      return {x:0, z:0};
+    }
+    return {x:dx, z:dz};
+  }
+
+  // animation phase for legs/arms
+  let walkPhase = 0;
+
+  function updateMovementAndAnim(delta){
+    velocity.x -= velocity.x * 12 * delta;
+    velocity.z -= velocity.z * 12 * delta;
+    velocity.y -= 9.8 * 4.5 * delta;
+
+    const fInput = Number(move.f) - Number(move.b);
+    const rInput = Number(move.r) - Number(move.l);
+    const len = Math.hypot(fInput,rInput) || 1;
+    const nf = fInput/len, nr = rInput/len;
+    const speed = move.sprint ? 78 : 56;
+
+    if(fInput || rInput){
+      velocity.z -= nf * speed * delta;
+      velocity.x -= nr * speed * delta;
+    }
+
+    // convert local velocity to world using rig yaw
+    const sinY = Math.sin(rig.rotation.y), cosY = Math.cos(rig.rotation.y);
+    const worldDX = (-velocity.x*cosY - velocity.z*sinY) * delta;
+    const worldDZ = ( velocity.x*sinY - velocity.z*cosY) * delta;
+
+    const chestY = rig.position.y + 1.3;
+    const allowed = collideAxis(rig.position.x, rig.position.z, worldDX, worldDZ, chestY);
+
+    rig.position.x += allowed.x;
+    rig.position.z += allowed.z;
+
+    groundY = sampleGroundY(rig.position.x, rig.position.z, rig.position.y);
+    rig.position.y += velocity.y*delta;
+
+    if(rig.position.y <= groundY){
+      rig.position.y = groundY;
+      velocity.y = 0;
+      grounded = true;
+    } else {
+      grounded = false;
+    }
+
+    // --- character walk animation ---
+    const horizSpeed = Math.hypot(velocity.x, velocity.z);
+    const moving = horizSpeed > 2 && grounded;
+    const dirSign = (fInput < 0) ? -1 : 1; // backpedal mirrors the gait
+
+    if(moving){
+      walkPhase += delta * (move.sprint ? 11 : 8) * dirSign;
+    } else {
+      walkPhase += (0 - walkPhase) * Math.min(1, delta*8) * 0; // hold pose smoothly toward idle below
+    }
+    const targetAmp = moving ? 0.62 : 0.0;
+    const amp = THREE.MathUtils.lerp(leftLeg.userData.amp || 0, targetAmp, Math.min(1, delta*10));
+    leftLeg.userData.amp = amp;
+
+    const swing = Math.sin(walkPhase) * amp;
+    leftLeg.rotation.x  =  swing;
+    rightLeg.rotation.x = -swing;
+    leftArm.rotation.x  = -swing*0.9;
+    rightArm.rotation.x =  swing*0.9;
+
+    // idle bob for head/torso when standing still
+    if(!moving){
+      const idle = Math.sin(performance.now()*0.0015)*0.02;
+      torso.rotation.z = idle;
+    } else {
+      torso.rotation.z = Math.sin(walkPhase*2)*0.03;
+    }
+
+    rig.position.y = Math.max(rig.position.y, 0);
+  }
+
+  // ==========================================
+  // 10. VIEW MODE (first / third person) + camera collision
+  // ==========================================
+  const camRay = new THREE.Raycaster();
+  const THIRD_PERSON_OFFSET = new THREE.Vector3(0, 0.6, 4.2);
+
+  function applyViewMode(){
+    if(state.view === 'first'){
+      character.visible = false;
+      camera.position.set(0,0,0);
+      document.getElementById('viewTag').textContent = 'FIRST PERSON';
+    } else {
+      character.visible = true;
+      document.getElementById('viewTag').textContent = 'THIRD PERSON';
+    }
+  }
+
+  function updateThirdPersonCamera(){
+    if(state.view !== 'third') return;
+    const desired = THIRD_PERSON_OFFSET.clone();
+    const worldDesired = desired.clone();
+    pitchObject.updateMatrixWorld();
+    const originWorld = new THREE.Vector3();
+    pitchObject.getWorldPosition(originWorld);
+    const dirWorld = desired.clone().applyQuaternion(pitchObject.getWorldQuaternion(new THREE.Quaternion())).normalize();
+    const dist = desired.length();
+
+    camRay.set(originWorld, dirWorld);
+    camRay.far = dist;
+    const hits = camRay.intersectObjects(buildable, false);
+    let finalDist = dist;
+    if(hits.length){ finalDist = Math.max(0.6, hits[0].distance - 0.3); }
+
+    camera.position.set(0,0,0);
+    camera.position.copy(desired.clone().setLength(finalDist));
+  }
+
+  // ==========================================
+  // 11. INPUT
+  // ==========================================
   document.addEventListener('keydown', (e)=>{
     if(!state.playing) return;
     switch(e.code){
@@ -458,6 +627,10 @@
       case 'Digit3': selectSlot(2); break;
       case 'Digit4': selectSlot(3); break;
       case 'KeyQ': selectSlot((state.selected+1)%4); break;
+      case 'KeyV':
+        state.view = state.view === 'first' ? 'third' : 'first';
+        applyViewMode();
+        break;
     }
   });
   document.addEventListener('keyup', (e)=>{
@@ -469,31 +642,26 @@
       case 'ShiftLeft': case 'ShiftRight': move.sprint=false; break;
     }
   });
-
   document.addEventListener('wheel', (e)=>{
     if(!state.playing) return;
-    const dir = e.deltaY > 0 ? 1 : -1;
-    selectSlot((state.selected + dir + 4) % 4);
+    selectSlot((state.selected + (e.deltaY>0?1:-1) + 4) % 4);
   });
-
   function selectSlot(i){
     state.selected = i;
     document.querySelectorAll('.slot').forEach((el,idx)=> el.classList.toggle('active', idx===i));
     refreshGhost();
   }
-  document.querySelectorAll('.slot').forEach(el=>{
-    el.style.pointerEvents = 'auto';
-  });
+  document.querySelectorAll('.slot').forEach(el=> el.style.pointerEvents = 'auto');
 
   document.addEventListener('mousedown', (e)=>{
-    if(!state.playing || !controls.isLocked) return;
+    if(!state.playing || !isLocked) return;
     if(e.button === 0) placePiece();
     if(e.button === 2) destroyPiece();
   });
   document.addEventListener('contextmenu', (e)=> e.preventDefault());
 
   // ==========================================
-  // 7. MENU WIRING
+  // 12. MENUS
   // ==========================================
   const mainMenu = document.getElementById('mainMenu');
   const pauseMenu = document.getElementById('pauseMenu');
@@ -505,32 +673,25 @@
     hud.style.display = 'block';
     crosshair.classList.remove('hidden');
     state.playing = true;
-    controls.lock();
+    applyViewMode();
+    requestLock();
   });
-
   document.getElementById('controlsBtn').addEventListener('click', ()=>{
     document.getElementById('keybindsBox').classList.toggle('hidden');
   });
-
   document.getElementById('resumeBtn').addEventListener('click', ()=>{
     pauseMenu.classList.add('hidden');
-    controls.lock();
+    requestLock();
   });
-
   document.getElementById('quitBtn').addEventListener('click', ()=>{
     pauseMenu.classList.add('hidden');
     hud.style.display = 'none';
     crosshair.classList.add('hidden');
     state.playing = false;
     mainMenu.classList.remove('hidden');
-    camera.position.set(0, PLAYER_HEIGHT, 18);
+    rig.position.set(0,0,18);
+    yaw=0; pitch=0; rig.rotation.y=0; pitchObject.rotation.x=0;
     velocity.set(0,0,0);
-  });
-
-  controls.addEventListener('unlock', ()=>{
-    if(state.playing){
-      pauseMenu.classList.remove('hidden');
-    }
   });
 
   function updateMatHud(){
@@ -541,39 +702,18 @@
   updateMatHud();
 
   // ==========================================
-  // 8. MAIN LOOP
+  // 13. MAIN LOOP
   // ==========================================
   let prevTime = performance.now();
   function animate(){
     requestAnimationFrame(animate);
     const time = performance.now();
+    const delta = Math.min((time - prevTime)/1000, 0.05); // clamped for stability
 
-    if(controls.isLocked){
-      const delta = Math.min((time - prevTime)/1000, 0.1);
-
-      velocity.x -= velocity.x * 12 * delta;
-      velocity.z -= velocity.z * 12 * delta;
-      velocity.y -= 9.8 * 4.5 * delta;
-
-      direction.z = Number(move.f) - Number(move.b);
-      direction.x = Number(move.r) - Number(move.l);
-      direction.normalize();
-
-      const speed = move.sprint ? 95 : 68;
-      if(move.f || move.b) velocity.z -= direction.z * speed * delta;
-      if(move.l || move.r) velocity.x -= direction.x * speed * delta;
-
-      controls.moveRight(-velocity.x * delta);
-      controls.moveForward(-velocity.z * delta);
-      controls.getObject().position.y += velocity.y * delta;
-
-      if(controls.getObject().position.y < PLAYER_HEIGHT){
-        velocity.y = 0;
-        controls.getObject().position.y = PLAYER_HEIGHT;
-        grounded = true;
-      }
-
+    if(isLocked && state.playing){
+      updateMovementAndAnim(delta);
       updateGhostAndHit();
+      updateThirdPersonCamera();
     }
 
     prevTime = time;
@@ -591,4 +731,3 @@
 </script>
 </body>
 </html>
-
