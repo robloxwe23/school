@@ -1,0 +1,2476 @@
+// ==UserScript==
+// @name         Stickers con sonido — browser port
+// @namespace    local.waas.soundstickers
+// @version      0.7.2-port1
+// @description  Browser-only port of the uploaded sound-sticker extension
+// @match        https://web.whatsapp.com/*
+// @run-at       document-idle
+// @grant        none
+// ==/UserScript==
+
+/*
+ * Browser userscript port assembled from the user's supplied project.
+ * Conversion and WhatsApp integration retain the original project logic.
+ * Chrome-extension storage/bridge features are replaced with in-memory logging.
+ * WhatsApp internal modules are undocumented and may change at any time.
+ */
+
+/* ===== bundled original: src/logger.js ===== */
+// Registro de eventos y errores (se ejecuta en el mundo de la página).
+// Cada entrada se guarda en memoria y se envía a bridge.js, que la persiste en chrome.storage.
+(() => {
+  const WAAS = (window.WAAS = window.WAAS || {});
+  if (WAAS.log) return;
+
+  WAAS.VERSION = "0.7.2";
+  WAAS.sessionId = Math.random().toString(36).slice(2, 10);
+  WAAS.entries = [];
+  WAAS.activeRun = null; // id de la operación en curso (crear/enviar)
+  const MAX_MEM = 3000;
+  const listeners = new Set();
+
+  function maskIds(s) {
+    // Oculta números largos (teléfonos, ids de grupo) dejando los 3 últimos dígitos.
+    return s.replace(/\d{7,}/g, (m) => "…" + m.slice(-3));
+  }
+
+  function sanitize(value, depth = 0) {
+    if (value == null) return value;
+    if (depth > 4) return "[profundidad máxima]";
+    if (value instanceof Error || (value && typeof value === "object" && "stack" in value && "message" in value)) {
+      return { name: value.name, message: maskIds(String(value.message)), stack: maskIds(String(value.stack || "")).slice(0, 4000) };
+    }
+    if (typeof Blob !== "undefined" && value instanceof Blob) return { blob: true, size: value.size, type: value.type };
+    if (value instanceof ArrayBuffer) return { arrayBuffer: value.byteLength };
+    if (ArrayBuffer.isView(value)) return { bytes: value.byteLength };
+    if (typeof value === "string") return maskIds(value.length > 3000 ? value.slice(0, 3000) + "…" : value);
+    if (typeof value === "number" || typeof value === "boolean") return value;
+    if (typeof value === "bigint") return String(value);
+    if (typeof value === "function") return "[función " + (value.name || "anónima") + "]";
+    if (Array.isArray(value)) return value.slice(0, 50).map((v) => sanitize(v, depth + 1));
+    if (typeof value === "object") {
+      const out = {};
+      let n = 0;
+      for (const k of Object.keys(value)) {
+        if (n++ > 60) { out["…"] = "más claves omitidas"; break; }
+        try { out[k] = sanitize(value[k], depth + 1); } catch (e) { out[k] = "[no legible]"; }
+      }
+      return out;
+    }
+    return String(value);
+  }
+
+  function log(level, event, data) {
+    const entry = {
+      ts: new Date().toISOString(),
+      level,
+      event,
+      run: WAAS.activeRun,
+      session: WAAS.sessionId,
+      data: sanitize(data),
+    };
+    WAAS.entries.push(entry);
+    if (WAAS.entries.length > MAX_MEM) WAAS.entries.splice(0, WAAS.entries.length - MAX_MEM);
+    try { window.postMessage({ __waas: "log", entry }, location.origin); } catch (e) { /* sin bridge */ }
+    // Solo console.debug: console.warn/error harían aparecer el evento en la página de errores de
+    // chrome://extensions como si fuera un fallo de la extensión. El nivel queda en el registro.
+    console.debug("[WAAS]", level, event, entry.data ?? "");
+    for (const l of listeners) { try { l(entry); } catch (e) { /* ignorar */ } }
+    return entry;
+  }
+
+  WAAS.log = log;
+  WAAS.info = (event, data) => log("info", event, data);
+  WAAS.warn = (event, data) => log("warn", event, data);
+  WAAS.error = (event, data) => log("error", event, data);
+  WAAS.onLog = (fn) => { listeners.add(fn); return () => listeners.delete(fn); };
+  WAAS.maskIds = maskIds;
+
+  // Ejecuta fn dentro de una "operación" con id propio; registra inicio, fin, duración y error.
+  WAAS.run = async function (name, fn) {
+    const prev = WAAS.activeRun;
+    const id = name + "-" + Date.now().toString(36);
+    WAAS.activeRun = id;
+    const t0 = performance.now();
+    log("info", name + ":inicio", null);
+    try {
+      const r = await fn();
+      log("info", name + ":fin", { ms: Math.round(performance.now() - t0) });
+      return r;
+    } catch (err) {
+      log("error", name + ":error", { ms: Math.round(performance.now() - t0), error: err });
+      throw err;
+    } finally {
+      WAAS.activeRun = prev;
+    }
+  };
+
+  // Errores globales: se registran si vienen de la extensión o si hay una operación en curso.
+  const EXT_MARK = "chrome-extension://";
+  window.addEventListener("error", (ev) => {
+    const stack = (ev.error && ev.error.stack) || "";
+    const fromExt = (ev.filename || "").startsWith(EXT_MARK) || stack.includes(EXT_MARK);
+    if (!fromExt && !WAAS.activeRun) return;
+    log("error", fromExt ? "error-global-extension" : "error-global-pagina", {
+      message: ev.message, file: ev.filename, line: ev.lineno, col: ev.colno, error: ev.error,
+    });
+  }, true);
+  window.addEventListener("unhandledrejection", (ev) => {
+    const r = ev.reason;
+    const stack = (r && r.stack) || "";
+    const fromExt = stack.includes(EXT_MARK);
+    if (!fromExt && !WAAS.activeRun) return;
+    log("error", fromExt ? "promesa-rechazada-extension" : "promesa-rechazada-pagina", { reason: r });
+  });
+
+  // Pide el registro completo persistido (vía bridge). Devuelve [] si no hay respuesta.
+  WAAS.getStoredLog = async function () { return WAAS.entries.slice(); };
+
+  log("info", "logger:listo", { version: WAAS.VERSION, url: location.href, ua: navigator.userAgent });
+})();
+
+
+/* ===== bundled original: src/convert.js ===== */
+// Conversión en el navegador: video, GIF o imagen + audio -> sticker WebP + audio Ogg/Opus (formato de WhatsApp).
+// No depende de WhatsApp; usa <video>, ImageDecoder (GIF), canvas (WebP), WebAudio y WebCodecs.
+(() => {
+  const WAAS = (window.WAAS = window.WAAS || {});
+  const log = (lvl, ev, data) => (WAAS.log ? WAAS.log(lvl, ev, data) : console.log(ev, data));
+
+  const SIDE = 512;                    // lado máximo (WhatsApp usa 512; más grande no se ve mejor y pesa 4 veces más)
+  const MAX_STICKER_BYTES = 1_000_000; // el servidor de WhatsApp rechaza stickers más pesados (HTTP 413)
+  const SAFE_BYTES = 900_000;          // margen para la estimación (verde = estimado ≤ 900 KB)
+  const MAX_AUDIO_BYTES = 1_000_000;   // límite de WhatsApp Web para el audio del sticker
+  const SAMPLE_RATE = 48000;
+  const CAPTURE_MEM_BYTES = 320e6;     // memoria máxima para los cuadros capturados (10 s a 30 fps caben a 512 px)
+  const SIDES = [512, 448, 384, 320, 256, 224, 192, 160, 128, 96, 64];
+  const FPS_LIST = [30, 25, 20, 15, 12, 10, 8, 6, 5];
+  const Q_MIN = 0.15;
+  // Calidad WebP por lado: con menos píxeles conviene comprimir menos.
+  const Q_BY_SIDE = { 512: 0.75, 448: 0.7, 384: 0.65, 320: 0.6, 256: 0.55, 224: 0.55, 192: 0.5, 160: 0.5, 128: 0.45, 96: 0.45, 64: 0.4 };
+
+  // Preferencia para la opción automática: la fluidez pesa más que la resolución (en pantalla un
+  // sticker es pequeño), pero sin bajar de ~160 px salvo que no quede otra.
+  // Más de 20 fps casi no suma (solo desempata); bajar de 192 px penaliza.
+  const FPS_SCORE = { 30: 101, 25: 100.5, 20: 100, 15: 80, 12: 55, 10: 40, 8: 25, 6: 12, 5: 5 };
+  function score(side, fps) {
+    return (FPS_SCORE[fps] || 0) + (40 * side) / 512 - (side < 192 ? (192 - side) / 3 : 0);
+  }
+
+  // fps de captura según la duración: lo que puede llegar a caber en 1 MB.
+  function captureFpsFor(dur) {
+    return dur <= 10 ? 30 : dur <= 20 ? 25 : dur <= 40 ? 20 : dur <= 80 ? 15 : 12;
+  }
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const te = new TextEncoder();
+
+  function checkAbort(signal) {
+    if (signal && signal.aborted) throw new DOMException("Cancelado por el usuario", "AbortError");
+  }
+
+  // ---------------------------------------------------------------- video
+  function loadVideo(file) {
+    return new Promise((resolve, reject) => {
+      const v = document.createElement("video");
+      v.muted = true;
+      v.playsInline = true;
+      v.preload = "auto";
+      const url = URL.createObjectURL(file);
+      const timer = setTimeout(() => reject(new Error("Tiempo agotado cargando el video")), 30000);
+      v.onloadeddata = async () => {
+        clearTimeout(timer);
+        // Algunos videos recortados conservan marcas de tiempo que no empiezan en 0
+        // (p. ej. empiezan en 130 s). Chrome se posiciona en el primer cuadro: ese es el desfase.
+        v._waasOffset = Number.isFinite(v.currentTime) ? v.currentTime : 0;
+        if (v.readyState < 4) {
+          await new Promise((r) => { const t = setTimeout(r, 5000); v.addEventListener("canplaythrough", () => { clearTimeout(t); r(); }, { once: true }); });
+        }
+        // Chrome solo corrige la duración cuando llega al final del archivo: se salta al final
+        // mientras la duración siga creciendo, y luego se vuelve al inicio.
+        const seekWait = (t) => new Promise((r) => {
+          const to = setTimeout(r, 3000);
+          v.addEventListener("seeked", () => { clearTimeout(to); r(); }, { once: true });
+          v.currentTime = t;
+        });
+        const initialDuration = v.duration;
+        for (let i = 0; i < 8 && Number.isFinite(v.duration); i++) {
+          const d = v.duration;
+          await seekWait(Math.max(0, d - 0.01));
+          await sleep(40);
+          if (!(v.duration > d + 0.01)) break;
+        }
+        await seekWait(v._waasOffset);
+        if (v.duration !== initialDuration) log("info", "video:duracion-corregida", { inicial: initialDuration, final: v.duration, desfase: v._waasOffset });
+        resolve(v);
+      };
+      v.onerror = () => {
+        clearTimeout(timer);
+        const e = v.error;
+        reject(new Error("El navegador no pudo leer el video" + (e ? ` (código ${e.code}: ${e.message || "formato no soportado"})` : "")));
+      };
+      v.src = url;
+      v._waasUrl = url;
+    });
+  }
+
+  function seek(v, t) {
+    return new Promise((resolve, reject) => {
+      if (Math.abs(v.currentTime - t) < 0.0005 && v.readyState >= 2) return resolve();
+      const timer = setTimeout(() => { v.removeEventListener("seeked", done); reject(new Error(`Tiempo agotado buscando el segundo ${t.toFixed(2)}`)); }, 8000);
+      function done() { clearTimeout(timer); resolve(); }
+      v.addEventListener("seeked", done, { once: true });
+      v.currentTime = t;
+    });
+  }
+
+  // Dimensiones de cualquier fuente dibujable: <video>, VideoFrame (GIF) o ImageBitmap (imagen).
+  const srcW = (s) => s.videoWidth || s.displayWidth || s.width;
+  const srcH = (s) => s.videoHeight || s.displayHeight || s.height;
+
+  function drawFrame(ctx, v, mode, side) {
+    const vw = srcW(v), vh = srcH(v);
+    ctx.clearRect(0, 0, side, side);
+    const s = mode === "recortar" ? Math.max(side / vw, side / vh) : Math.min(side / vw, side / vh);
+    const w = vw * s, h = vh * s;
+    ctx.drawImage(v, (side - w) / 2, (side - h) / 2, w, h);
+  }
+
+  async function probeVideo(file) {
+    const v = await loadVideo(file);
+    try {
+      const offset = v._waasOffset || 0;
+      return { duration: v.duration - offset, offset, width: v.videoWidth, height: v.videoHeight };
+    } finally {
+      URL.revokeObjectURL(v._waasUrl);
+    }
+  }
+
+  function makeSnapper(side, mode) {
+    const canvas = new OffscreenCanvas(side, side);
+    const ctx = canvas.getContext("2d");
+    const fpCanvas = new OffscreenCanvas(32, 32);
+    const fpCtx = fpCanvas.getContext("2d", { willReadFrequently: true });
+    return (v) => {
+      drawFrame(ctx, v, mode, side);
+      fpCtx.clearRect(0, 0, 32, 32);
+      fpCtx.drawImage(canvas, 0, 0, 32, 32);
+      const fp = fpCtx.getImageData(0, 0, 32, 32).data;
+      return { bmpPromise: createImageBitmap(canvas), fp, used: false };
+    };
+  }
+
+  // Captura reproduciendo el video y tomando cada cuadro mostrado (requestVideoFrameCallback).
+  // Es mucho más rápida que saltar cuadro por cuadro en videos largos.
+  function captureByPlayback(v, t0, dur, fps, side, mode, onProgress, signal) {
+    return new Promise((resolve, reject) => {
+      if (typeof v.requestVideoFrameCallback !== "function") return reject(new Error("sin requestVideoFrameCallback"));
+      const n = Math.max(1, Math.round(dur * fps));
+      const T = Array.from({ length: n }, (_, k) => t0 + (k + 0.5) / fps);
+      const tEnd = t0 + dur;
+      const slots = new Array(n);
+      const snap = makeSnapper(side, mode);
+      let next = 0, last = null, pendingFirst = 0, done = false, presented = 0;
+      // El elemento se adjunta al documento (casi invisible) para que Chrome componga sus cuadros.
+      v.style.cssText = "position:fixed;right:0;bottom:0;width:4px;height:4px;opacity:0.01;pointer-events:none;z-index:-1";
+      document.body.appendChild(v);
+      let watchdog = setTimeout(() => finish(new Error("La reproducción no entregó cuadros")), 4000);
+      const finish = (err) => {
+        if (done) return;
+        done = true;
+        clearTimeout(watchdog);
+        v.pause();
+        v.remove();
+        if (err) {
+          for (const s of new Set(slots.filter(Boolean).concat(last ? [last] : []))) s.bmpPromise.then((b) => b.close());
+          return reject(err);
+        }
+        while (next < n && last) slots[next++] = last;
+        if (last) last.used = true;
+        resolve({ slots, presented });
+      };
+      const cb = (now, meta) => {
+        if (done) return;
+        if (signal && signal.aborted) return finish(new DOMException("Cancelado por el usuario", "AbortError"));
+        clearTimeout(watchdog);
+        watchdog = setTimeout(() => finish(new Error("La reproducción se detuvo")), 4000);
+        presented++;
+        const mt = meta.mediaTime;
+        // Los puntos de muestreo anteriores a este cuadro pertenecen al cuadro previo.
+        while (next < n && T[next] < mt - 1e-4) {
+          if (last) { slots[next++] = last; last.used = true; } else { pendingFirst++; next++; }
+        }
+        if (last && !last.used) last.bmpPromise.then((b) => b.close());
+        last = snap(v);
+        if (pendingFirst) { for (let i = 0; i < pendingFirst; i++) slots[i] = last; last.used = true; pendingFirst = 0; }
+        if (onProgress && presented % 10 === 0) onProgress(`Leyendo cuadros ${next}/${n}`, next / n);
+        if (next >= n || mt >= tEnd || v.ended) return finish();
+        v.requestVideoFrameCallback(cb);
+      };
+      v.addEventListener("ended", () => finish(), { once: true });
+      seek(v, t0).then(() => {
+        v.requestVideoFrameCallback(cb);
+        v.playbackRate = 1;
+        return v.play();
+      }).catch((e) => finish(e));
+    });
+  }
+
+  // Captura saltando cuadro por cuadro (respaldo, más lenta pero no depende de la reproducción).
+  async function captureBySeeking(v, t0, dur, fps, side, mode, onProgress, signal) {
+    const n = Math.max(1, Math.round(dur * fps));
+    const snap = makeSnapper(side, mode);
+    const maxT = Math.max(0, v.duration - 0.001);
+    const slots = [];
+    for (let i = 0; i < n; i++) {
+      checkAbort(signal);
+      // Se toma el cuadro en la mitad de cada intervalo: si el salto cae justo en el borde entre
+      // dos cuadros, el navegador a veces devuelve el anterior y se pierden cuadros.
+      await seek(v, Math.min(t0 + (i + 0.5) / fps, maxT));
+      const s = snap(v);
+      s.used = true;
+      slots.push(s);
+      if (onProgress && (i % 5 === 0 || i === n - 1)) onProgress(`Leyendo cuadros ${i + 1}/${n}`, (i + 1) / n);
+    }
+    return { slots, presented: n };
+  }
+
+  // Por defecto se salta cuadro por cuadro: es más lento pero exacto (cada instante recibe su cuadro).
+  // La reproducción queda como respaldo si un salto se atasca.
+  async function captureFrames(file, start, dur, fps, side, mode, onProgress, signal, method = "saltos") {
+    const t0 = performance.now();
+    let v = await loadVideo(file);
+    try {
+      if (!v.videoWidth || !v.videoHeight) throw new Error("El video no tiene imagen (¿es solo audio?)");
+      const offset = v._waasOffset || 0;
+      const methods = method === "reproduccion" ? ["reproduccion", "saltos"] : ["saltos", "reproduccion"];
+      let res, metodo;
+      for (let i = 0; i < methods.length; i++) {
+        metodo = methods[i];
+        try {
+          res = metodo === "saltos"
+            ? await captureBySeeking(v, offset + start, dur, fps, side, mode, onProgress, signal)
+            : await captureByPlayback(v, offset + start, dur, fps, side, mode, onProgress, signal);
+          break;
+        } catch (e) {
+          if ((e && e.name === "AbortError") || i === methods.length - 1) throw e;
+          log("info", "video:captura-respaldo", { fallo: metodo, motivo: String(e && e.message || e) });
+          URL.revokeObjectURL(v._waasUrl);
+          v = await loadVideo(file);
+        }
+      }
+      // Resolver los bitmaps y deduplicar referencias.
+      const frames = [];
+      const cache = new Map();
+      for (const s of res.slots) {
+        if (!cache.has(s)) cache.set(s, { bmp: await s.bmpPromise, fp: s.fp });
+        frames.push(cache.get(s));
+      }
+      let unique = 0;
+      for (let i = 0; i < frames.length; i++) if (i === 0 || !sameBytes(frames[i].fp, frames[i - 1].fp)) unique++;
+      log("info", "video:cuadros", { metodo, cuadros: frames.length, distintos: unique, mostrados: res.presented, fpsCaptura: fps, ladoCaptura: side, ms: Math.round(performance.now() - t0), ancho: v.videoWidth, alto: v.videoHeight, duracionVideo: v.duration, desfase: offset });
+      if (offset > 0) log("info", "video:desfase", `El video empieza en ${offset.toFixed(3)} s; se compensó`);
+      return frames;
+    } finally {
+      URL.revokeObjectURL(v._waasUrl);
+      v.removeAttribute("src");
+      v.load();
+    }
+  }
+
+  // ---------------------------------------------------------------- GIF e imágenes
+  // GIF, WebP animado y APNG se decodifican con ImageDecoder (WebCodecs): <video> no los abre.
+  const animCache = new WeakMap(); // File -> { durs (ms por cuadro), width, height }
+
+  function isAnimationFile(file) {
+    return /^image\/(gif|webp|png|apng)$/i.test(file.type || "") || /\.(gif|webp|png|apng)$/i.test(file.name || "");
+  }
+
+  function imageType(file) {
+    if (file.type && file.type.startsWith("image/")) return file.type;
+    const ext = (file.name || "").split(".").pop().toLowerCase();
+    return { gif: "image/gif", webp: "image/webp", png: "image/png", apng: "image/apng", jpg: "image/jpeg", jpeg: "image/jpeg" }[ext] || "image/gif";
+  }
+
+  async function openDecoder(file) {
+    if (typeof ImageDecoder === "undefined") throw new Error("Este navegador no puede leer GIF animados (falta ImageDecoder). Usa Chrome o Edge actualizados.");
+    const type = imageType(file);
+    if (!(await ImageDecoder.isTypeSupported(type))) throw new Error("El navegador no puede leer imágenes " + type);
+    const dec = new ImageDecoder({ data: await file.arrayBuffer(), type });
+    await dec.completed;
+    await dec.tracks.ready;
+    return dec;
+  }
+
+  // Duración de cada cuadro. Los navegadores muestran a 100 ms los cuadros de GIF que dicen durar
+  // 10 ms o menos (muchos GIF viejos dicen 0); aquí se hace lo mismo para que se vea igual.
+  async function probeAnimation(file) {
+    if (animCache.has(file)) return animCache.get(file);
+    const dec = await openDecoder(file);
+    try {
+      const track = dec.tracks.selectedTrack;
+      const n = track ? track.frameCount : 1;
+      const durs = [];
+      let width = 0, height = 0;
+      for (let i = 0; i < n; i++) {
+        const { image } = await dec.decode({ frameIndex: i });
+        if (!i) { width = image.displayWidth; height = image.displayHeight; }
+        const ms = image.duration != null ? image.duration / 1000 : 0;
+        durs.push(ms > 10 ? ms : 100);
+        image.close();
+      }
+      const info = { frames: n, durs, duration: n > 1 ? durs.reduce((a, b) => a + b, 0) / 1000 : 0, width, height, animated: n > 1 };
+      animCache.set(file, info);
+      return info;
+    } finally {
+      dec.close();
+    }
+  }
+
+  // Captura un GIF a fps fijo durante dur segundos (si dur supera al GIF, este se repite).
+  async function captureAnimation(file, dur, fps, side, mode, onProgress, signal) {
+    const t0 = performance.now();
+    const info = await probeAnimation(file);
+    const ends = [];
+    let acc = 0;
+    for (const d of info.durs) { acc += d; ends.push(acc); }
+    const total = acc || 1;
+    const n = Math.max(1, Math.round(dur * fps));
+    const want = [];
+    for (let i = 0; i < n; i++) {
+      const t = (((i + 0.5) * 1000) / fps) % total;
+      let k = 0;
+      while (k < ends.length - 1 && ends[k] <= t) k++;
+      want.push(k);
+    }
+    const needed = [...new Set(want)].sort((a, b) => a - b);
+    const snap = makeSnapper(side, mode);
+    const byIndex = new Map();
+    const dec = await openDecoder(file);
+    try {
+      for (let j = 0; j < needed.length; j++) {
+        checkAbort(signal);
+        const { image } = await dec.decode({ frameIndex: needed[j] });
+        const s = snap(image);
+        image.close();
+        byIndex.set(needed[j], { bmp: await s.bmpPromise, fp: s.fp });
+        if (onProgress && (j % 5 === 0 || j === needed.length - 1)) onProgress(`Leyendo cuadros del GIF ${j + 1}/${needed.length}`, (j + 1) / needed.length);
+      }
+    } finally {
+      dec.close();
+    }
+    const frames = want.map((k) => byIndex.get(k));
+    log("info", "gif:cuadros", { cuadrosGif: info.frames, usados: needed.length, cuadros: frames.length, fpsCaptura: fps, ladoCaptura: side, duracionGif: info.duration, ms: Math.round(performance.now() - t0) });
+    return frames;
+  }
+
+  // Imagen fija (JPG, PNG, WebP…). En un GIF se toma el primer cuadro.
+  async function probeImage(file) {
+    let bmp;
+    try { bmp = await createImageBitmap(file); } catch (e) { throw new Error("El navegador no pudo leer la imagen (" + (e && e.message ? e.message : e) + ")"); }
+    const out = { width: bmp.width, height: bmp.height, animated: false };
+    bmp.close();
+    if (isAnimationFile(file) && typeof ImageDecoder !== "undefined") {
+      try { out.animated = (await probeAnimation(file)).animated; } catch (e) { /* se usa como imagen fija */ }
+    }
+    return out;
+  }
+
+  async function captureImage(file, side, mode) {
+    const bmp = await createImageBitmap(file);
+    try {
+      const s = makeSnapper(side, mode)(bmp);
+      return { bmp: await s.bmpPromise, fp: s.fp };
+    } finally {
+      bmp.close();
+    }
+  }
+
+  // Línea de tiempo del sticker: los cuadros capturados (que cubren capDur) se reparten en dur
+  // segundos. Si dur es mayor, la animación se repite ("repetir") o se queda en su último cuadro.
+  function fitTimeline(captured, capDur, dur, fps, fit) {
+    const n = Math.max(1, Math.round(dur * fps));
+    if (n === captured.length) return captured;
+    const out = new Array(n);
+    for (let i = 0; i < n; i++) {
+      const t = (i + 0.5) / fps;
+      const tv = fit === "repetir" ? t % capDur : Math.min(t, capDur);
+      out[i] = captured[Math.max(0, Math.min(captured.length - 1, Math.floor(tv * fps)))];
+    }
+    return out;
+  }
+
+  // ---------------------------------------------------------------- WebP
+  function readChunks(bytes) {
+    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const tag = (o) => String.fromCharCode(bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]);
+    if (tag(0) !== "RIFF" || tag(8) !== "WEBP") throw new Error("El canvas no devolvió un WebP válido");
+    const chunks = [];
+    let i = 12;
+    while (i + 8 <= bytes.length) {
+      const fourcc = tag(i);
+      const size = dv.getUint32(i + 4, true);
+      chunks.push({ fourcc, data: bytes.subarray(i + 8, i + 8 + size) });
+      i += 8 + size + (size & 1);
+    }
+    return chunks;
+  }
+
+  function chunk(fourcc, data) {
+    const pad = data.length & 1;
+    const out = new Uint8Array(8 + data.length + pad);
+    out.set(te.encode(fourcc), 0);
+    new DataView(out.buffer).setUint32(4, data.length, true);
+    out.set(data, 8);
+    return out;
+  }
+
+  function concat(parts) {
+    const len = parts.reduce((a, p) => a + p.length, 0);
+    const out = new Uint8Array(len);
+    let o = 0;
+    for (const p of parts) { out.set(p, o); o += p.length; }
+    return out;
+  }
+
+  function u24(arr, off, v) { arr[off] = v & 255; arr[off + 1] = (v >> 8) & 255; arr[off + 2] = (v >> 16) & 255; }
+
+  // Codifica un cuadro como WebP estático y devuelve los sub-chunks de imagen (ALPH + VP8 / VP8L).
+  async function encodeStaticFrame(bitmap, quality, canvas, ctx) {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    const blob = await canvas.convertToBlob({ type: "image/webp", quality });
+    if (blob.type !== "image/webp") throw new Error("Este navegador no puede generar WebP (devolvió " + blob.type + "). Usa Chrome o Edge.");
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    const parts = readChunks(bytes).filter((c) => c.fourcc === "ALPH" || c.fourcc === "VP8 " || c.fourcc === "VP8L");
+    if (!parts.some((c) => c.fourcc === "VP8 " || c.fourcc === "VP8L")) throw new Error("WebP sin datos de imagen");
+    const payload = concat(parts.map((c) => chunk(c.fourcc, c.data)));
+    const hasAlpha = parts.some((c) => c.fourcc === "ALPH" || c.fourcc === "VP8L");
+    return { payload, hasAlpha };
+  }
+
+  function buildAnimatedWebp(frames, exif, side = SIDE) {
+    // frames: [{payload, hasAlpha, durationMs}]
+    const anyAlpha = frames.some((f) => f.hasAlpha);
+    const vp8x = new Uint8Array(10);
+    vp8x[0] = 0x02 | (anyAlpha ? 0x10 : 0) | (exif ? 0x08 : 0); // animación, alfa, EXIF
+    u24(vp8x, 4, side - 1);
+    u24(vp8x, 7, side - 1);
+    const anim = new Uint8Array(6); // color de fondo 0 (transparente), bucle infinito
+    const parts = [chunk("VP8X", vp8x), chunk("ANIM", anim)];
+    for (const f of frames) {
+      const hdr = new Uint8Array(16);
+      u24(hdr, 0, 0); u24(hdr, 3, 0);
+      u24(hdr, 6, side - 1); u24(hdr, 9, side - 1);
+      u24(hdr, 12, Math.max(1, Math.min(0xffffff, f.durationMs)));
+      hdr[15] = 0x02; // sin mezcla (cada cuadro reemplaza al anterior), sin descarte
+      parts.push(chunk("ANMF", concat([hdr, f.payload])));
+    }
+    if (exif) parts.push(chunk("EXIF", exif));
+    const body = concat(parts);
+    const riff = new Uint8Array(12);
+    riff.set(te.encode("RIFF"), 0);
+    new DataView(riff.buffer).setUint32(4, 4 + body.length, true);
+    riff.set(te.encode("WEBP"), 8);
+    return concat([riff, body]);
+  }
+
+  // WebP fijo (un solo cuadro, sin animación) con los metadatos de WhatsApp.
+  function buildStillWebp(frame, exif, side = SIDE) {
+    const vp8x = new Uint8Array(10);
+    vp8x[0] = (frame.hasAlpha ? 0x10 : 0) | (exif ? 0x08 : 0);
+    u24(vp8x, 4, side - 1);
+    u24(vp8x, 7, side - 1);
+    const body = concat([chunk("VP8X", vp8x), frame.payload].concat(exif ? [chunk("EXIF", exif)] : []));
+    const riff = new Uint8Array(12);
+    riff.set(te.encode("RIFF"), 0);
+    new DataView(riff.buffer).setUint32(4, 4 + body.length, true);
+    riff.set(te.encode("WEBP"), 8);
+    return concat([riff, body]);
+  }
+
+  function exifWhatsApp(meta) {
+    // Bloque TIFF big-endian con un único tag 0x5741 ("WA") que contiene el JSON (igual que WhatsApp).
+    const js = te.encode(JSON.stringify(meta));
+    const out = new Uint8Array(26 + js.length);
+    const dv = new DataView(out.buffer);
+    out.set([0x4d, 0x4d, 0x00, 0x2a], 0);
+    dv.setUint32(4, 8);
+    dv.setUint16(8, 1);
+    dv.setUint16(10, 0x5741);
+    dv.setUint16(12, 7);
+    dv.setUint32(14, js.length);
+    dv.setUint32(18, 26);
+    dv.setUint32(22, 0);
+    out.set(js, 26);
+    return out;
+  }
+
+  function sameBytes(a, b) {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+    return true;
+  }
+
+  // Elige qué cuadros capturados usar para un fps y cuánto dura cada uno.
+  function plan(nCaptured, dur, fps, captureFps) {
+    const totalMs = Math.round(dur * 1000);
+    const count = Math.max(1, Math.round(dur * fps));
+    const out = [];
+    for (let k = 0; k < count; k++) {
+      const startMs = Math.round((k * 1000) / fps);
+      const endMs = k === count - 1 ? totalMs : Math.min(totalMs, Math.round(((k + 1) * 1000) / fps));
+      const idx = Math.min(nCaptured - 1, Math.round((k * captureFps) / fps));
+      out.push({ idx, durationMs: Math.max(1, endMs - startMs) });
+    }
+    return out;
+  }
+
+  // Codifica el sticker para un lado y fps dados. Empieza con la calidad del lado y la baja
+  // solo si hace falta para no pasar de 1 MB.
+  async function encodeWebp(an, side, fps, exifMeta, { onProgress, signal, syncMs = 0, still = false }) {
+    const { frames, dur, captureFps } = an;
+    const canvas = new OffscreenCanvas(side, side);
+    const ctx = canvas.getContext("2d");
+    const p = plan(frames.length, dur, fps, captureFps);
+    const qStart = Q_BY_SIDE[side] || 0.5;
+    const qList = [];
+    for (let q = qStart; q >= Q_MIN - 1e-9; q -= 0.1) qList.push(+q.toFixed(2));
+    if (qList[qList.length - 1] > Q_MIN) qList.push(Q_MIN);
+    const attempts = [];
+    let best = null;
+    for (let i = 0; i < qList.length; i++) {
+      const q = qList[i];
+      // Con la muestra del análisis se salta directo a una calidad que probablemente quepa.
+      if (best && an.sampleBytes && i < qList.length - 1) {
+        const ratio = sampleAvg(an, side, q) / sampleAvg(an, side, best.q);
+        if (ratio > 0 && best.bytes.length * ratio > MAX_STICKER_BYTES * 0.98) { attempts.push({ q, saltado: true, previsto: Math.round(best.bytes.length * ratio) }); continue; }
+      }
+      const cache = new Map();
+      const out = [];
+      let prevF = null;
+      for (let k = 0; k < p.length; k++) {
+        checkAbort(signal);
+        const f = frames[p[k].idx];
+        const prev = out[out.length - 1];
+        // Cuadro repetido (mismo criterio que la estimación): se alarga el anterior y no se codifica.
+        if (prev && prevF && (f === prevF || sameBytes(f.fp, prevF.fp))) { prev.durationMs += p[k].durationMs; continue; }
+        let enc = cache.get(f);
+        if (!enc) { enc = await encodeStaticFrame(f.bmp, q, canvas, ctx); cache.set(f, enc); }
+        prevF = f;
+        if (prev && sameBytes(prev.payload, enc.payload)) prev.durationMs += p[k].durationMs;
+        else out.push({ payload: enc.payload, hasAlpha: enc.hasAlpha, durationMs: p[k].durationMs });
+        if (onProgress && k % 10 === 0) onProgress(`Codificando (${side} px, ${fps} fps, calidad ${Math.round(q * 100)}) ${k + 1}/${p.length}`, (k + 1) / p.length);
+      }
+      // Compensación de desfase: el primer cuadro se muestra syncMs más, para que la imagen espere al audio.
+      if (syncMs > 0 && !still) out[0] = { ...out[0], durationMs: out[0].durationMs + syncMs };
+      const bytes = still ? buildStillWebp(out[0], exifWhatsApp(exifMeta), side) : buildAnimatedWebp(out, exifWhatsApp(exifMeta), side);
+      attempts.push({ q, bytes: bytes.length, cuadros: out.length });
+      best = { bytes, side, fps, q, frames: out.length };
+      if (bytes.length <= MAX_STICKER_BYTES) break;
+    }
+    log("info", "webp:intentos", { side, fps, intentos: attempts });
+    if (!best || best.bytes.length > MAX_STICKER_BYTES) {
+      throw new Error(`No cabe en 1 MB ni con la calidad mínima (${Math.round(best.bytes.length / 1000)} KB). Elige menos fps o menos resolución.`);
+    }
+    return best;
+  }
+
+  function sampleAvg(an, side, q) {
+    const m = an.sampleBytes && an.sampleBytes[side];
+    if (!m) return 0;
+    if (m[q] != null) return m[q];
+    // Interpolación lineal entre las calidades medidas.
+    const qs = Object.keys(m).map(Number).sort((x, y) => x - y);
+    if (q <= qs[0]) return m[qs[0]];
+    if (q >= qs[qs.length - 1]) return m[qs[qs.length - 1]];
+    for (let i = 0; i < qs.length - 1; i++) if (q >= qs[i] && q <= qs[i + 1]) {
+      const t = (q - qs[i]) / (qs[i + 1] - qs[i]);
+      return m[qs[i]] + t * (m[qs[i + 1]] - m[qs[i]]);
+    }
+    return 0;
+  }
+
+  // ---------------------------------------------------------------- audio
+  // El audio decodificado se guarda por archivo: la forma de onda y la creación no lo decodifican dos veces.
+  const audioCache = new WeakMap();
+  function decodeAudioFile(file) {
+    if (!audioCache.has(file)) {
+      const p = (async () => {
+        const buf = await file.arrayBuffer();
+        try {
+          const dctx = new OfflineAudioContext(1, SAMPLE_RATE, SAMPLE_RATE);
+          return await dctx.decodeAudioData(buf);
+        } catch (e) {
+          const err = new Error("No se pudo leer el audio. ¿El archivo tiene sonido? (" + (e && e.message ? e.message : e) + ")");
+          err.cause = e;
+          throw err;
+        }
+      })();
+      p.catch(() => audioCache.delete(file));
+      audioCache.set(file, p);
+    }
+    return audioCache.get(file);
+  }
+
+  // Duración y forma de onda (picos por tramo) de un archivo de audio o de video.
+  async function probeAudio(file, buckets = 1200) {
+    const d = await decodeAudioFile(file);
+    const chans = Array.from({ length: d.numberOfChannels }, (_, c) => d.getChannelData(c));
+    const per = Math.max(1, Math.floor(d.length / buckets));
+    const peaks = new Float32Array(Math.ceil(d.length / per));
+    let max = 0;
+    for (let b = 0; b < peaks.length; b++) {
+      let p = 0;
+      const end = Math.min(d.length, (b + 1) * per);
+      for (const ch of chans) for (let i = b * per; i < end; i += 4) { const a = Math.abs(ch[i]); if (a > p) p = a; }
+      peaks[b] = p;
+      if (p > max) max = p;
+    }
+    return { duration: d.duration, channels: d.numberOfChannels, peaks, peakMax: max };
+  }
+
+  async function extractAudio(file, start, dur, fadeMs = 0) {
+    const decoded = await decodeAudioFile(file);
+    if (decoded.duration < start + 0.05) throw new Error(`El audio dura ${decoded.duration.toFixed(2)} s y el tramo empieza en ${start.toFixed(2)} s`);
+    const len = Math.max(1, Math.round(dur * SAMPLE_RATE));
+    const octx = new OfflineAudioContext(1, len, SAMPLE_RATE);
+    const src = octx.createBufferSource();
+    src.buffer = decoded;
+    src.connect(octx.destination); // mezcla a mono
+    src.start(0, start, dur);
+    const rendered = await octx.startRendering();
+    const pcm = rendered.getChannelData(0);
+    // Fundido muy corto en los bordes: un corte a mitad de una onda suena como un "clic".
+    if (fadeMs > 0) {
+      const f = Math.min(Math.floor(pcm.length / 2), Math.round((fadeMs / 1000) * SAMPLE_RATE));
+      for (let i = 0; i < f; i++) { const g = i / f; pcm[i] *= g; pcm[pcm.length - 1 - i] *= g; }
+    }
+    let peak = 0, sumsq = 0;
+    for (let i = 0; i < pcm.length; i++) { const a = Math.abs(pcm[i]); if (a > peak) peak = a; sumsq += pcm[i] * pcm[i]; }
+    const rms = Math.sqrt(sumsq / pcm.length);
+    log("info", "audio:pcm", { canalesOriginales: decoded.numberOfChannels, rateOriginal: decoded.sampleRate, duracionAudio: decoded.duration, muestras: pcm.length, pico: +peak.toFixed(4), rms: +rms.toFixed(4) });
+    if (peak < 0.0005) log("warn", "audio:silencio", "El tramo elegido parece no tener sonido");
+    return pcm;
+  }
+
+  async function encodeOpus(pcm, bitrate = 32000) {
+    if (typeof AudioEncoder === "undefined") throw new Error("Este navegador no tiene WebCodecs (AudioEncoder). Usa Chrome o Edge actualizados.");
+    const base = { codec: "opus", sampleRate: SAMPLE_RATE, numberOfChannels: 1, bitrate };
+    const candidates = [
+      { ...base, bitrateMode: "variable", opus: { frameDuration: 20000, complexity: 10, application: "voip", signal: "voice" } },
+      { ...base, bitrateMode: "variable", opus: { frameDuration: 20000 } },
+      base,
+    ];
+    let config = null;
+    for (const c of candidates) {
+      try { if ((await AudioEncoder.isConfigSupported(c)).supported) { config = c; break; } } catch (e) { /* probar siguiente */ }
+    }
+    if (!config) throw new Error("El navegador no puede codificar Opus con WebCodecs");
+    const packets = [];
+    let description = null;
+    let encError = null;
+    const enc = new AudioEncoder({
+      output: (chunkOut, meta) => {
+        const b = new Uint8Array(chunkOut.byteLength);
+        chunkOut.copyTo(b);
+        packets.push(b);
+        if (!description && meta && meta.decoderConfig && meta.decoderConfig.description) {
+          const d = meta.decoderConfig.description;
+          description = d instanceof ArrayBuffer ? new Uint8Array(d) : new Uint8Array(d.buffer, d.byteOffset, d.byteLength);
+        }
+      },
+      error: (e) => { encError = e; },
+    });
+    enc.configure(config);
+    const BLOCK = 960 * 50;
+    for (let i = 0; i < pcm.length; i += BLOCK) {
+      const n = Math.min(BLOCK, pcm.length - i);
+      const data = new Float32Array(pcm.subarray(i, i + n));
+      const ad = new AudioData({ format: "f32-planar", sampleRate: SAMPLE_RATE, numberOfFrames: n, numberOfChannels: 1, timestamp: Math.round((i / SAMPLE_RATE) * 1e6), data });
+      enc.encode(ad);
+      ad.close();
+    }
+    await enc.flush();
+    enc.close();
+    if (encError) throw encError;
+    let preSkip = 312;
+    if (description && description.length >= 12 && String.fromCharCode(...description.subarray(0, 8)) === "OpusHead") {
+      preSkip = description[10] | (description[11] << 8);
+    }
+    return { packets, preSkip, config };
+  }
+
+  // Ogg (RFC 3533) + encapsulado Opus (RFC 7845)
+  const CRC_TABLE = (() => {
+    const t = new Uint32Array(256);
+    for (let i = 0; i < 256; i++) {
+      let r = i << 24;
+      for (let j = 0; j < 8; j++) r = r & 0x80000000 ? (r << 1) ^ 0x04c11db7 : r << 1;
+      t[i] = r >>> 0;
+    }
+    return t;
+  })();
+  function oggCrc(bytes) {
+    let c = 0;
+    for (let i = 0; i < bytes.length; i++) c = ((c << 8) ^ CRC_TABLE[((c >>> 24) ^ bytes[i]) & 0xff]) >>> 0;
+    return c >>> 0;
+  }
+  function oggPage(headerType, granule, serial, seq, packetList) {
+    const lacing = [];
+    for (const p of packetList) {
+      let len = p.length;
+      while (len >= 255) { lacing.push(255); len -= 255; }
+      lacing.push(len);
+    }
+    if (lacing.length > 255) throw new Error("Página Ogg con demasiados segmentos");
+    const dataLen = packetList.reduce((a, p) => a + p.length, 0);
+    const page = new Uint8Array(27 + lacing.length + dataLen);
+    const dv = new DataView(page.buffer);
+    page.set(te.encode("OggS"), 0);
+    page[4] = 0;
+    page[5] = headerType;
+    dv.setBigInt64(6, BigInt(granule), true);
+    dv.setUint32(14, serial, true);
+    dv.setUint32(18, seq, true);
+    dv.setUint32(22, 0, true);
+    page[26] = lacing.length;
+    page.set(lacing, 27);
+    let o = 27 + lacing.length;
+    for (const p of packetList) { page.set(p, o); o += p.length; }
+    dv.setUint32(22, oggCrc(page), true);
+    return page;
+  }
+  function buildOggOpus(packets, preSkip, totalSamples) {
+    const serial = (Math.random() * 0xffffffff) >>> 0;
+    const head = new Uint8Array(19);
+    head.set(te.encode("OpusHead"), 0);
+    head[8] = 1; head[9] = 1;
+    new DataView(head.buffer).setUint16(10, preSkip, true);
+    new DataView(head.buffer).setUint32(12, SAMPLE_RATE, true);
+    const vendor = te.encode("WAAudioStickers");
+    const tags = new Uint8Array(8 + 4 + vendor.length + 4);
+    tags.set(te.encode("OpusTags"), 0);
+    new DataView(tags.buffer).setUint32(8, vendor.length, true);
+    tags.set(vendor, 12);
+    const pages = [oggPage(0x02, 0, serial, 0, [head]), oggPage(0x00, 0, serial, 1, [tags])];
+    const finalGranule = preSkip + totalSamples;
+    const PER_PAGE = 50; // ~1 s por página con cuadros de 20 ms
+    let seq = 2;
+    for (let i = 0; i < packets.length; i += PER_PAGE) {
+      const group = packets.slice(i, i + PER_PAGE);
+      const last = i + PER_PAGE >= packets.length;
+      const granule = last ? finalGranule : Math.min(finalGranule, preSkip + (i + group.length) * 960);
+      pages.push(oggPage(last ? 0x04 : 0x00, granule, serial, seq++, group));
+    }
+    return concat(pages);
+  }
+
+  async function sha256b64(bytes) {
+    const h = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+    let s = "";
+    for (const b of h) s += String.fromCharCode(b);
+    return btoa(s);
+  }
+
+  async function verifyOgg(bytes) {
+    try {
+      const ctx = new OfflineAudioContext(1, SAMPLE_RATE, SAMPLE_RATE);
+      const buf = await ctx.decodeAudioData(bytes.slice().buffer);
+      return { ok: true, duracion: +buf.duration.toFixed(3) };
+    } catch (e) {
+      return { ok: false, error: String(e && e.message ? e.message : e) };
+    }
+  }
+
+  // ---------------------------------------------------------------- metadatos del sticker
+  // WhatsApp muestra el nombre del paquete y el autor bajo el sticker. Los stickers con el mismo
+  // paquete y autor comparten identificador (se calcula a partir de ambos) para agruparse.
+  async function packIdFor(packName, publisher) {
+    if (!packName && !publisher) return crypto.randomUUID();
+    const h = new Uint8Array(await crypto.subtle.digest("SHA-256", te.encode("stickers-con-sonido|" + packName + "|" + publisher)));
+    const x = Array.from(h.subarray(0, 16), (b) => b.toString(16).padStart(2, "0")).join("");
+    return `${x.slice(0, 8)}-${x.slice(8, 12)}-${x.slice(12, 16)}-${x.slice(16, 20)}-${x.slice(20, 32)}`;
+  }
+  async function stickerMeta({ packName = "", publisher = "", soundSha }) {
+    packName = String(packName || "").trim().slice(0, 128);
+    publisher = String(publisher || "").trim().slice(0, 128);
+    const meta = { "sticker-pack-id": await packIdFor(packName, publisher) };
+    if (packName) meta["sticker-pack-name"] = packName;
+    if (publisher) meta["sticker-pack-publisher"] = publisher;
+    meta.emojis = ["🔊"];
+    meta["sound-sha256"] = soundSha;
+    return meta;
+  }
+  // Cambia los metadatos (EXIF) de un sticker ya creado sin volver a codificarlo.
+  async function retagWebp(blob, { packName, publisher, soundSha }) {
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    const chunks = readChunks(bytes).filter((c) => c.fourcc !== "EXIF");
+    const vp8x = chunks.find((c) => c.fourcc === "VP8X");
+    if (vp8x) { const d = new Uint8Array(vp8x.data); d[0] |= 0x08; vp8x.data = d; }
+    const meta = await stickerMeta({ packName, publisher, soundSha });
+    const body = concat([te.encode("WEBP")].concat(chunks.map((c) => chunk(c.fourcc, c.data)), [chunk("EXIF", exifWhatsApp(meta))]));
+    const riff = new Uint8Array(8);
+    riff.set(te.encode("RIFF"), 0);
+    new DataView(riff.buffer).setUint32(4, body.length, true);
+    return new Blob([concat([riff, body])], { type: "image/webp" });
+  }
+
+  // ---------------------------------------------------------------- API pública
+  // Paso 1: captura el tramo una sola vez y estima cuánto pesaría cada combinación de
+  // resolución y fps. Los cuadros quedan en memoria para crear el sticker sin recapturar.
+  //
+  // Fuentes:
+  // - visual: { kind: "video" | "gif" | "image", file, start, dur }  (un GIF se usa completo: start 0)
+  // - audio:  { file, start, dur }  (puede ser otro archivo; por defecto, el mismo video y tramo)
+  // - fit, cuando la imagen y el audio duran distinto:
+  //   "repetir"       el sticker dura lo que el audio y la animación se repite;
+  //   "congelar"      el sticker dura lo que el audio y queda en el último cuadro;
+  //   "independiente" cada uno conserva su duración (WhatsApp no exige que coincidan).
+  // Si la animación es más larga que el audio, con "repetir"/"congelar" se corta al largo del audio.
+  // Una imagen fija siempre dura lo que el audio.
+  async function analyze({ file, start = 0, duration, mode = "ajustar", visual, audio, fit = "repetir", onProgress, signal }) {
+    if (!visual) visual = { kind: "video", file, start, dur: duration };
+    if (!audio) audio = { file: visual.file, start: visual.start, dur: visual.dur };
+    const prog = onProgress || (() => {});
+    const t0 = performance.now();
+    const vDur = visual.kind === "image" ? audio.dur : visual.dur;
+    const dur = visual.kind === "image" || fit !== "independiente" ? audio.dur : vDur; // duración del sticker
+    const capDur = Math.min(vDur, dur);                                                // lo que se captura
+    const base = { file: visual.file, start: visual.start || 0, visual, audio, fit, dur, vDur, mode };
+
+    if (visual.kind === "image") {
+      // Un solo cuadro que dura todo el audio: no hay combinaciones de fps que elegir.
+      log("info", "analizar:parametros", { tipo: "imagen", archivo: visual.file.name, bytes: visual.file.size, duracionAudio: audio.dur, modo: mode });
+      prog("Leyendo la imagen…", 0.3);
+      const f = await captureImage(visual.file, SIDE, mode);
+      const cells = SIDES.map((side) => ({ side, fps: 1, estado: "ok", score: side }));
+      const an = { ...base, frames: [f], captureFps: 1, captureSide: SIDE, distinct: { 1: 1 }, cells, auto: cells[0], ms: Math.round(performance.now() - t0) };
+      prog("Imagen lista", 1);
+      return an;
+    }
+
+    const captureFps = captureFpsFor(dur);
+    const slots = Math.ceil(capDur * captureFps);
+    const captureSide = Math.max(64, Math.min(SIDE, Math.floor(Math.sqrt(CAPTURE_MEM_BYTES / (4 * slots)))));
+    log("info", "analizar:parametros", {
+      tipo: visual.kind, archivo: visual.file.name, bytes: visual.file.size, inicio: visual.start || 0, duracionImagen: vDur,
+      audioAparte: audio.file !== visual.file, duracionAudio: audio.dur, ajuste: fit, duracionSticker: dur, modo: mode, captureFps, captureSide,
+    });
+    const capProg = (t, f) => prog(t, f * 0.8);
+    const captured = visual.kind === "gif"
+      ? await captureAnimation(visual.file, capDur, captureFps, captureSide, mode, capProg, signal)
+      : await captureFrames(visual.file, visual.start || 0, capDur, captureFps, captureSide, mode, capProg, signal);
+    const frames = fitTimeline(captured, capDur, dur, captureFps, fit);
+    const sides = SIDES.filter((x) => x <= captureSide);
+    const fpsList = FPS_LIST.filter((x) => x <= captureFps);
+    // Cuadros distintos para cada fps (los repetidos se fusionan y casi no pesan).
+    const distinct = {};
+    for (const f of fpsList) {
+      const p = plan(frames.length, dur, f, captureFps);
+      let d = 0;
+      for (let k = 0; k < p.length; k++) {
+        const a = frames[p[k].idx], b = k ? frames[p[k - 1].idx] : null;
+        if (!b || (a !== b && !sameBytes(a.fp, b.fp))) d++;
+      }
+      distinct[f] = d;
+    }
+    // Muestra: hasta 24 cuadros distintos repartidos por el tramo, con un desplazamiento
+    // irregular para no coincidir con contenidos que se repiten en ciclos (p. ej. cada segundo).
+    const uniq = [];
+    for (let i = 0; i < frames.length; i++) if (!i || (frames[i] !== frames[i - 1] && !sameBytes(frames[i].fp, frames[i - 1].fp))) uniq.push(frames[i]);
+    const M = Math.min(24, uniq.length);
+    const sample = Array.from({ length: M }, (_, i) => uniq[Math.min(uniq.length - 1, Math.floor(((i + ((i * 0.618) % 1)) * uniq.length) / M))]);
+    const sampleBytes = {};
+    let done = 0;
+    for (const side of sides) {
+      const canvas = new OffscreenCanvas(side, side);
+      const ctx = canvas.getContext("2d");
+      sampleBytes[side] = {};
+      for (const q of [Q_BY_SIDE[side], 0.35, Q_MIN]) {
+        if (sampleBytes[side][q] != null) continue;
+        let sum = 0;
+        for (const f of sample) { checkAbort(signal); sum += (await encodeStaticFrame(f.bmp, q, canvas, ctx)).payload.length; }
+        sampleBytes[side][q] = sum / sample.length;
+      }
+      prog("Calculando opciones…", 0.8 + (0.2 * ++done) / sides.length);
+    }
+    const overhead = 32; // cabecera ANMF + chunk
+    const cells = [];
+    for (const side of SIDES) for (const fps of FPS_LIST) {
+      if (!sampleBytes[side] || distinct[fps] == null) { cells.push({ side, fps, estado: "fuera" }); continue; }
+      const n = distinct[fps];
+      const est = (sampleBytes[side][Q_BY_SIDE[side]] + overhead) * n + 400;
+      const estMin = (sampleBytes[side][Q_MIN] + overhead) * n + 400;
+      const estado = est <= SAFE_BYTES ? "ok" : estMin <= SAFE_BYTES ? "baja" : "no";
+      cells.push({ side, fps, est: Math.round(est), estMin: Math.round(estMin), estado, score: score(side, fps) });
+    }
+    const pick = (st) => cells.filter((c) => c.estado === st).sort((x, y) => y.score - x.score)[0];
+    const auto = pick("ok") || pick("baja") || null;
+    const an = { ...base, frames, captureFps, captureSide, sampleBytes, distinct, cells, auto, ms: Math.round(performance.now() - t0) };
+    log("info", "analizar:resultado", {
+      ms: an.ms, captureFps, captureSide, distintos: distinct, muestra: M,
+      auto: auto && { side: auto.side, fps: auto.fps, est: auto.est, estado: auto.estado },
+      caben: cells.filter((c) => c.estado === "ok").length, conMenosCalidad: cells.filter((c) => c.estado === "baja").length,
+    });
+    prog("Opciones listas", 1);
+    return an;
+  }
+
+  function release(an) {
+    if (!an || !an.frames) return;
+    for (const f of new Set(an.frames)) { try { f.bmp.close(); } catch (e) { /* ya cerrado */ } }
+    an.frames = null;
+  }
+
+  // Paso 2: codifica el audio y el sticker con la combinación elegida.
+  async function create(an, { side, fps, syncMs = 0, still = false, audio = null, onProgress, signal, packName = "", publisher = "" }) {
+    if (!an || !an.frames) throw new Error("Primero calcula las opciones del tramo");
+    syncMs = Math.max(0, Math.min(1000, Math.round(+syncMs || 0)));
+    still = !!still && an.visual.kind === "image";
+    const prog = onProgress || (() => {});
+    const t0 = performance.now();
+    const { dur } = an;
+    // El audio puede cambiar después del análisis sin recalcular: con "independiente" no afecta a los cuadros.
+    const A = audio || an.audio;
+    if (an.visual.kind === "image" || an.fit !== "independiente") {
+      if (Math.abs(A.dur - an.audio.dur) > 0.002) throw new Error("La duración del audio cambió: vuelve a calcular las opciones");
+    }
+    const cell = an.cells.find((c) => c.side === side && c.fps === fps);
+    log("info", "crear:parametros", { side, fps, compensacionMs: syncMs, estatico: still, estimado: cell && cell.est, estado: cell && cell.estado });
+
+    // Audio: la tasa de bits baja en clips largos para no pasar de 1 MB (límite de WhatsApp).
+    const bitrate = Math.max(12000, Math.min(32000, Math.floor((0.9 * MAX_AUDIO_BYTES * 8) / A.dur)));
+    if ((bitrate / 8) * A.dur > 0.97 * MAX_AUDIO_BYTES) throw new Error(`Con ${Math.round(A.dur)} s el audio no cabe en 1 MB (límite de WhatsApp). Máximo unos ${Math.floor((0.9 * MAX_AUDIO_BYTES * 8) / 12000 / 60)} minutos.`);
+    prog("Extrayendo audio…", 0);
+    // Un audio aparte se corta donde el usuario quiera: se suaviza el corte para evitar clics.
+    const pcm = await extractAudio(A.file, A.start, A.dur, A.file !== an.visual.file ? 8 : 0);
+    checkAbort(signal);
+    prog("Codificando audio…", 0.05);
+    const { packets, preSkip, config } = await encodeOpus(pcm, bitrate);
+    const ogg = buildOggOpus(packets, preSkip, pcm.length);
+    if (ogg.length > MAX_AUDIO_BYTES) throw new Error(`El audio pesa ${Math.round(ogg.length / 1000)} KB (máximo 1000 KB)`);
+    const soundSha = await sha256b64(ogg);
+    const oggCheck = await verifyOgg(ogg);
+    log(oggCheck.ok ? "info" : "error", "audio:ogg", { bytes: ogg.length, paquetes: packets.length, preSkip, config, verificacion: oggCheck, soundSha256: soundSha });
+    if (!oggCheck.ok) throw new Error("El audio generado no se puede reproducir: " + oggCheck.error);
+
+    const exifMeta = await stickerMeta({ packName, publisher, soundSha });
+    const w = await encodeWebp(an, side, fps, exifMeta, { onProgress: prog, signal, syncMs, still });
+    const info = {
+      tipo: an.visual.kind, ajuste: an.fit,
+      duracion: dur, duracionAudio: A.dur, segundosAudio: Math.max(1, Math.round(A.dur)),
+      fps: an.visual.kind === "image" ? null : w.fps, calidad: w.q, lado: w.side, cuadros: w.frames, isAnimated: !still,
+      compensacionMs: syncMs, webpBytes: w.bytes.length, estimado: cell && cell.est,
+      oggBytes: ogg.length, audioKbps: Math.round(bitrate / 1000), soundSha256: soundSha, paquete: exifMeta["sticker-pack-name"] || "", autor: exifMeta["sticker-pack-publisher"] || "",
+      msTotal: Math.round(performance.now() - t0),
+    };
+    log("info", "crear:resultado", info);
+    prog("Listo", 1);
+    return { webp: new Blob([w.bytes], { type: "image/webp" }), ogg: new Blob([ogg], { type: "audio/ogg; codecs=opus" }), info };
+  }
+
+  // Atajo (pruebas): analizar + elegir (automático o fijo) + crear.
+  async function convert({ file, start = 0, duration, mode = "ajustar", visual, audio, fit, still = false, syncMs = 0, side = "auto", fps = "auto", onProgress, signal }) {
+    const an = await analyze({ file, start, duration, mode, visual, audio, fit, onProgress, signal });
+    try {
+      let c = an.auto;
+      if (side !== "auto" || fps !== "auto") {
+        const ok = an.cells.filter((x) => (side === "auto" || x.side === +side) && (fps === "auto" || x.fps === +fps) && x.estado !== "no" && x.estado !== "fuera");
+        c = ok.sort((x, y) => y.score - x.score)[0];
+      }
+      if (!c) throw new Error("Ninguna combinación cabe en 1 MB para este tramo");
+      const r = await create(an, { side: c.side, fps: c.fps, syncMs, still, onProgress, signal });
+      r.analysis = { auto: an.auto, cells: an.cells, ms: an.ms, captureFps: an.captureFps, captureSide: an.captureSide };
+      return r;
+    } finally {
+      release(an);
+    }
+  }
+
+  // Comprobaciones del navegador para el diagnóstico.
+  async function capabilities() {
+    const out = { offscreenCanvas: typeof OffscreenCanvas !== "undefined", webCodecsAudio: typeof AudioEncoder !== "undefined" };
+    try {
+      const c = new OffscreenCanvas(4, 4);
+      c.getContext("2d").fillRect(0, 0, 2, 2);
+      const b = await c.convertToBlob({ type: "image/webp", quality: 0.5 });
+      out.webpEncode = b.type;
+    } catch (e) { out.webpEncode = "error: " + e.message; }
+    if (out.webCodecsAudio) {
+      try { out.opus = (await AudioEncoder.isConfigSupported({ codec: "opus", sampleRate: 48000, numberOfChannels: 1, bitrate: 32000 })).supported; } catch (e) { out.opus = "error: " + e.message; }
+    }
+    return out;
+  }
+
+  WAAS.convert = convert;
+  WAAS.probeVideo = probeVideo;
+  WAAS.probeAudio = probeAudio;
+  WAAS.probeImage = probeImage;
+  WAAS.probeAnimation = probeAnimation;
+  WAAS.isAnimationFile = isAnimationFile;
+  WAAS.capabilities = capabilities;
+  WAAS.analyze = analyze;
+  WAAS.retagWebp = retagWebp;
+  WAAS.create = create;
+  WAAS.release = release;
+  WAAS.limits = { SIDE, MAX_STICKER_BYTES, MAX_AUDIO_BYTES, SIDES, FPS_LIST };
+  WAAS._internals = { buildOggOpus, buildAnimatedWebp, buildStillWebp, fitTimeline, exifWhatsApp, readChunks, plan, sha256b64, score };
+})();
+
+
+/* ===== bundled original: src/wa.js ===== */
+// Integración con WhatsApp Web: usa sus propios módulos internos (window.require) para
+// subir el audio, enviar el sticker con stickerAudio y abrir el diálogo nativo de "Reenviar".
+(() => {
+  const WAAS = (window.WAAS = window.WAAS || {});
+  const log = (lvl, ev, data) => WAAS.log(lvl, ev, data);
+  const W = (WAAS.wa = {});
+
+  const SOUND_PROPS = ["sound_stickers_consumption_enabled", "sound_stickers_creation_enabled", "sound_stickers_audio_playing_enabled"];
+  const NEEDED = [
+    "WAWebChatCollection", "WAWebMsgCollection", "WAWebMediaPrep", "WAWebMediaOpaqueData",
+    "WAWebUploadManagerMainThread", "WAWebUploadManager", "WAWebCreateMediaUploadMetrics", "WAWebMmsMediaTypes",
+    "WAWebMediaGetUploadOriginForChat", "WAWebSoundStickerGating", "WAWebSoundStickerUtils", "WAWebABProps",
+    "WAWebModalManager", "WAWebForwardMessageFlowLoadable", "WAWebStateUtils", "WAWebUserPrefsMeUser",
+    "WAWebFindChatAction", "WAWebSendMsgResultAction", "WAWebAck", "WALogger", "react",
+  ];
+
+  // ------------------------------------------------------------ acceso a módulos
+  function hasLoader() { return typeof window.require === "function" && typeof window.__d === "function"; }
+
+  function ns(name) {
+    if (typeof window.importNamespace === "function") {
+      try { const m = window.importNamespace(name); if (m) return m; } catch (e) { /* probar require */ }
+    }
+    return window.require(name);
+  }
+  function def(name) {
+    const m = ns(name);
+    return m && m.default !== undefined ? m.default : m;
+  }
+  async function load(name, timeoutMs = 15000) {
+    try { return ns(name); } catch (e) { /* puede ser un módulo diferido */ }
+    if (typeof window.requireLazy !== "function") throw new Error(`Módulo ${name} no disponible y no hay requireLazy`);
+    await new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error(`Tiempo agotado cargando el módulo ${name}`)), timeoutMs);
+      window.requireLazy([name], () => { clearTimeout(t); resolve(); });
+    });
+    return ns(name);
+  }
+  W.ns = ns; W.def = def; W.load = load; W.hasLoader = hasLoader;
+
+  function waVersion() {
+    try { return (window.Debug && window.Debug.VERSION) || null; } catch (e) { return null; }
+  }
+
+  function abValues() {
+    const out = {};
+    try {
+      const AB = ns("WAWebABProps");
+      for (const p of SOUND_PROPS.concat(["sound_stickers_channels_send_enabled"])) {
+        try { out[p] = AB.getABPropConfigValue(p); } catch (e) { out[p] = "error: " + e.message; }
+      }
+    } catch (e) { out.error = e.message; }
+    return out;
+  }
+
+  // ------------------------------------------------------------ diagnóstico
+  W.diagnose = async function () {
+    const mods = {};
+    for (const n of NEEDED) {
+      try { const m = ns(n); mods[n] = m ? "ok" : "vacío"; } catch (e) { mods[n] = "falta: " + e.message.slice(0, 120); }
+    }
+    let caps = null;
+    try { caps = await WAAS.capabilities(); } catch (e) { caps = { error: e.message }; }
+    let activeChat = null;
+    try { const c = ns("WAWebChatCollection").ChatCollection.getActive(); activeChat = c ? describeChat(c) : null; } catch (e) { activeChat = "error: " + e.message; }
+    const d = {
+      extension: WAAS.VERSION,
+      waVersion: waVersion(),
+      loader: { require: typeof window.require, importNamespace: typeof window.importNamespace, requireLazy: typeof window.requireLazy },
+      modulos: mods,
+      abPropsOriginales: W._abOriginal || abValues(),
+      abPropsActuales: abValues(),
+      navegador: caps,
+      chatAbierto: activeChat,
+      gatingForzado: !!W._forced,
+    };
+    log("info", "diagnostico", d);
+    return d;
+  };
+
+  function describeChat(chat) {
+    try {
+      const id = chat.id;
+      return {
+        tipo: id.isGroup && id.isGroup() ? "grupo" : id.server === "lid" ? "lid" : id.isUser && id.isUser() ? "usuario" : String(id.server),
+        id: WAAS.maskIds(String(id._serialized || id)),
+        nombre: WAAS.maskIds(String(chat.formattedTitle || chat.name || "")).slice(0, 40),
+      };
+    } catch (e) { return { error: e.message }; }
+  }
+  W.describeChat = describeChat;
+
+  // ------------------------------------------------------------ activar stickers con sonido (local)
+  W.forceSoundStickers = function () {
+    if (W._forced) return true;
+    W._abOriginal = abValues();
+    let method = null;
+    try {
+      const AB = ns("WAWebABProps");
+      const orig = AB.getABPropConfigValue;
+      if (!orig.__waas) {
+        const patched = function (name) {
+          if (SOUND_PROPS.includes(name)) return true;
+          return orig.apply(this, arguments);
+        };
+        patched.__waas = true;
+        AB.getABPropConfigValue = patched;
+      }
+      method = "WAWebABProps";
+    } catch (e) { log("warn", "gating:abprops-fallo", e); }
+    let G;
+    try { G = ns("WAWebSoundStickerGating"); } catch (e) { log("error", "gating:modulo-falta", e); }
+    const ok = () => { try { return G.isSoundStickerCreationEnabled() === true && G.isSoundStickerConsumptionEnabled() === true; } catch (e) { return false; } };
+    if (G && !ok()) {
+      try {
+        G.isSoundStickerConsumptionEnabled = () => true;
+        G.isSoundStickerCreationEnabled = () => true;
+        G.isSoundStickerPlaybackEnabled = () => true;
+        method = "WAWebSoundStickerGating";
+      } catch (e) { log("warn", "gating:modulo-fallo", e); }
+    }
+    W._forced = !!G && ok();
+    log(W._forced ? "info" : "error", "gating:forzar", { metodo: method, original: W._abOriginal, ahora: abValues(), activo: W._forced });
+    return W._forced;
+  };
+
+  // ------------------------------------------------------------ registrar logs internos de WA durante una operación
+  W.hookWALogger = function () {
+    if (W._loggerHooked) return;
+    try {
+      const L = ns("WALogger");
+      const RELEVANT = /sticker|media|upload|sound|forward|prep|send|mms|encrypt|kaleidoscope/i;
+      for (const lvl of ["LOG", "WARN", "ERROR"]) {
+        const orig = L[lvl];
+        if (typeof orig !== "function" || orig.__waas) continue;
+        const wrapped = function (strings) {
+          try {
+            if (WAAS.activeRun && strings && strings.raw) {
+              const vals = Array.prototype.slice.call(arguments, 1);
+              let msg = "";
+              for (let i = 0; i < strings.length; i++) msg += strings[i] + (i < vals.length ? String(vals[i]) : "");
+              if (lvl !== "LOG" || RELEVANT.test(msg)) log(lvl === "ERROR" ? "error" : lvl === "WARN" ? "warn" : "info", "wa-" + lvl.toLowerCase(), msg);
+            }
+          } catch (e) { /* nunca romper el logger de WA */ }
+          return orig.apply(this, arguments);
+        };
+        wrapped.__waas = true;
+        L[lvl] = wrapped;
+      }
+      W._loggerHooked = true;
+      log("info", "walogger:enganchado", null);
+    } catch (e) { log("warn", "walogger:no-enganchado", e); }
+  };
+
+  // ------------------------------------------------------------ chats
+  W.getActiveChat = function () {
+    return ns("WAWebChatCollection").ChatCollection.getActive() || null;
+  };
+
+  W.getSelfChat = async function () {
+    const Me = ns("WAWebUserPrefsMeUser");
+    const CC = ns("WAWebChatCollection").ChatCollection;
+    const getters = ["getMaybeMePnUser", "getMeUserOrThrow", "getMaybeMeLidUser"];
+    let firstWid = null;
+    for (const g of getters) {
+      try {
+        const wid = Me[g] && Me[g]();
+        if (!wid) continue;
+        firstWid = firstWid || wid;
+        const c = CC.get(wid) || CC.get(String(wid._serialized || wid));
+        if (c) { log("info", "chat-propio:encontrado", { via: g, chat: describeChat(c) }); return c; }
+      } catch (e) { /* siguiente */ }
+    }
+    if (!firstWid) throw new Error("No se pudo obtener tu propio número");
+    const r = await ns("WAWebFindChatAction").findOrCreateLatestChat(firstWid, "forwardSelectedModals");
+    const chat = r && (r.chat || r);
+    log("info", "chat-propio:creado", { chat: describeChat(chat) });
+    return chat;
+  };
+
+  // ------------------------------------------------------------ subida del audio
+  function toB64(v) {
+    if (v == null) return v;
+    if (typeof v === "string") return v;
+    const bytes = v instanceof ArrayBuffer ? new Uint8Array(v) : new Uint8Array(v.buffer || v);
+    let s = "";
+    for (const b of bytes) s += String.fromCharCode(b);
+    return btoa(s);
+  }
+  function b64Len(s) { try { return atob(s).length; } catch (e) { return -1; } }
+
+  const noopQpl = new Proxy({}, { get: () => () => undefined });
+
+  W.uploadAudio = async function (oggBlob, seconds, chat) {
+    const MT = ns("WAWebMmsMediaTypes").MEDIA_TYPES;
+    let uploadOrigin = 1;
+    try { uploadOrigin = def("WAWebMediaGetUploadOriginForChat")(chat); } catch (e) { log("warn", "subida:origen", e); }
+    const params = {
+      blob: oggBlob, type: MT.AUDIO, signal: new AbortController().signal, uploadQpl: noopQpl,
+      uploadOrigin, fileOrigin: undefined, userUploadAttemptCount: 0, forwardedFromWeb: false, isViewOnce: false, isHdPhoto: false,
+    };
+    let res, via;
+    try {
+      const metrics = def("WAWebCreateMediaUploadMetrics")(params);
+      res = await def("WAWebUploadManagerMainThread").encryptAndUpload(params, metrics);
+      via = "MainThread";
+    } catch (e) {
+      log("warn", "subida:mainthread-fallo", e);
+      res = await def("WAWebUploadManager").encryptAndUpload(params);
+      via = "UploadManager";
+    }
+    const bytes = new Uint8Array(await oggBlob.arrayBuffer());
+    const filehash = await WAAS._internals.sha256b64(bytes);
+    const stickerAudio = {
+      deprecatedMms3Url: res.url || undefined,
+      directPath: res.directPath,
+      mediaKey: toB64(res.mediaKey),
+      mediaKeyTimestamp: res.mediaKeyTimestamp,
+      filehash,
+      encFilehash: toB64(res.encFilehash),
+      size: bytes.length,
+      mimetype: "audio/ogg; codecs=opus",
+      duration: seconds,
+    };
+    let complete = null;
+    try { complete = ns("WAWebSoundStickerUtils").isCompleteStickerAudio(stickerAudio); } catch (e) { complete = "error: " + e.message; }
+    log(complete === true ? "info" : "error", "subida:audio", {
+      via,
+      tiposRespuesta: Object.fromEntries(Object.entries(res || {}).map(([k, v]) => [k, v == null ? String(v) : v.constructor ? v.constructor.name : typeof v])),
+      directPath: stickerAudio.directPath ? stickerAudio.directPath.split("?")[0] : null,
+      tieneUrl: !!stickerAudio.deprecatedMms3Url,
+      mediaKeyBytes: b64Len(stickerAudio.mediaKey),
+      encFilehashBytes: b64Len(stickerAudio.encFilehash),
+      filehash, size: stickerAudio.size, duration: seconds,
+      isCompleteStickerAudio: complete,
+    });
+    if (complete !== true) throw new Error("WhatsApp no considera válido el audio subido (isCompleteStickerAudio=" + complete + ")");
+    return stickerAudio;
+  };
+
+  // ------------------------------------------------------------ envío del sticker
+  W.sendSticker = async function (chat, webpBlob, info, stickerAudio) {
+    const Opaque = def("WAWebMediaOpaqueData");
+    const MediaPrep = def("WAWebMediaPrep");
+    const opaque = await Opaque.createFromData(webpBlob, "image/webp");
+    const data = {
+      type: "sticker", mediaBlob: opaque, mimetype: "image/webp", size: webpBlob.size,
+      fullWidth: info.lado || 512, fullHeight: info.lado || 512, isAnimated: !!info.isAnimated, emojis: ["🔊"],
+    };
+    const prep = new MediaPrep("sticker", Promise.resolve(data));
+    log("info", "envio:preparado", { chat: describeChat(chat), webpBytes: webpBlob.size, conAudio: !!stickerAudio });
+    const res = await prep.sendToChat({ chat, options: stickerAudio ? { stickerAudio } : {} });
+    const OK = ns("WAWebSendMsgResultAction").SendMsgResult.OK;
+    const msg = res && res.msg;
+    const resumen = {
+      resultado: res && res.messageSendResult,
+      ok: res && res.messageSendResult === OK,
+      msgId: msg && msg.id ? WAAS.maskIds(String(msg.id._serialized || msg.id)) : null,
+      msgTieneStickerAudio: msg ? !!(msg.stickerAudio || (msg.attributes && msg.attributes.stickerAudio)) : null,
+      ack: msg ? msg.ack : null,
+    };
+    log(resumen.ok ? "info" : "error", "envio:resultado", resumen);
+    if (!resumen.ok) throw new Error("WhatsApp no pudo enviar el sticker (" + resumen.resultado + ")");
+    return msg;
+  };
+
+  W.waitForAck = async function (msg, timeoutMs = 30000) {
+    const ACK = ns("WAWebAck").ACK;
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeoutMs) {
+      const a = msg.ack;
+      if (a >= ACK.SENT) { log("info", "envio:ack", { ack: a, ms: Date.now() - t0 }); return a; }
+      if (a < 0) throw new Error("El mensaje quedó en estado de error (ack " + a + ")");
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    log("warn", "envio:ack-tiempo-agotado", { ack: msg.ack });
+    return msg.ack;
+  };
+
+  W.openForward = async function (msg) {
+    const React = ns("react");
+    const MM = ns("WAWebModalManager");
+    const FL = await load("WAWebForwardMessageFlowLoadable");
+    const SU = ns("WAWebStateUtils");
+    let model = msg;
+    try {
+      const MC = ns("WAWebMsgCollection").MsgCollection;
+      model = MC.get(msg.id) || msg;
+    } catch (e) { /* usar msg */ }
+    const close = MM.closeModalManager || (() => MM.ModalManager.close());
+    MM.ModalManager.open(
+      React.createElement(FL.ForwardMessageFlowLoadable, {
+        msgs: [SU.unproxy(model)],
+        onClose: close,
+        onForward: (msgs) => log("info", "reenvio:hecho", { mensajes: msgs ? msgs.length : null }),
+      }),
+      { transition: "modal-flow" }
+    );
+    log("info", "reenvio:dialogo-abierto", null);
+  };
+
+  // Flujo completo: subir audio, enviar al chat de destino y (opcional) abrir Reenviar.
+  W.publish = async function ({ webp, ogg, info }, { destino = "propio", abrirReenviar = true, onProgress } = {}) {
+    const prog = onProgress || (() => {});
+    W.hookWALogger();
+    if (!W.forceSoundStickers()) log("warn", "publicar:gating", "No se pudo activar la opción de stickers con sonido; el audio podría descartarse");
+    prog("Buscando chat…");
+    const chat = destino === "abierto" ? W.getActiveChat() : await W.getSelfChat();
+    if (!chat) throw new Error(destino === "abierto" ? "Abre primero un chat" : "No se encontró tu chat propio");
+    prog("Subiendo audio…");
+    const stickerAudio = await W.uploadAudio(ogg, info.segundosAudio, chat);
+    prog("Enviando sticker…");
+    const msg = await W.sendSticker(chat, webp, info, stickerAudio);
+    if (abrirReenviar) {
+      prog("Esperando confirmación del servidor…");
+      await W.waitForAck(msg);
+      prog("Abriendo Reenviar…");
+      await W.openForward(msg);
+    }
+    return { chat, msg };
+  };
+})();
+
+
+/* ===== bundled original: src/ui.js ===== */
+// Interfaz: panel en Shadow DOM que se abre con el botón de la extensión.
+// Tres pestañas, cada una con su formulario: video con su sonido, imagen + audio, y video o GIF + otro audio.
+// Sin innerHTML (WhatsApp Web usa Trusted Types): todo el DOM se crea con createElement.
+(() => {
+  const WAAS = (window.WAAS = window.WAAS || {});
+  const log = (lvl, ev, data) => WAAS.log(lvl, ev, data);
+  const FRAME = 1 / 30;     // paso del ajuste fino
+  const MIN_LEN = 0.3;      // duración mínima de un tramo
+  const DEFAULT_LEN = 10;   // tramo inicial al abrir un archivo
+
+  const CSS = `
+  :host { all: initial; }
+  * { box-sizing: border-box; font-family: system-ui, "Segoe UI", Roboto, sans-serif; }
+  .overlay { position: fixed; inset: 0; z-index: 2147483001; background: rgba(0,0,0,.5); display: flex; align-items: center; justify-content: center; }
+  .panel { --bg:#ffffff; --fg:#111b21; --muted:#667781; --card:#f0f2f5; --line:#d1d7db; --accent:#00a884; --accent-fg:#fff;
+           --ok:#25d366; --ok-bg:rgba(37,211,102,.18); --warn:#d29a00; --warn-bg:rgba(240,180,0,.2); --no:#8696a0; --err:#d13b3b;
+           width: min(680px, 96vw); max-height: 94vh; overflow: auto; background: var(--bg); color: var(--fg);
+           border-radius: 14px; padding: 18px 20px 14px; box-shadow: 0 12px 48px rgba(0,0,0,.45); font-size: 14px; }
+  .panel.dark { --bg:#111b21; --fg:#e9edef; --muted:#8696a0; --card:#202c33; --line:#2a3942; --ok-bg:rgba(37,211,102,.22); --warn-bg:rgba(240,180,0,.22); }
+  header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+  h2 { margin: 0; font-size: 19px; }
+  .muted { color: var(--muted); font-size: 12px; }
+  .hdr-r { display: flex; align-items: center; gap: 8px; flex: none; }
+  .kofi { display: inline-flex; align-items: center; gap: 4px; padding: 5px 13px; border-radius: 18px; background: #fff3cf; border: 1px solid #f2c14e;
+          color: #7a4b00; font-size: 12.5px; font-weight: 700; text-decoration: none; white-space: nowrap; transition: background .12s, border-color .12s; }
+  .panel.dark .kofi { background: rgba(255,196,60,.12); border-color: rgba(255,196,60,.45); color: #ffcf66; }
+  .kofi:hover { background: #ffe9a8; }
+  .panel.dark .kofi:hover { background: rgba(255,196,60,.22); }
+  .note { color: var(--warn); font-size: 12.5px; }
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: 6px 0 4px; }
+  .tabs button { border: none; background: none; color: var(--muted); padding: 8px 12px; font-size: 13.5px; font-weight: 600; border-bottom: 3px solid transparent; margin-bottom: -1px; }
+  .tabs button.on { color: var(--fg); border-bottom-color: var(--accent); }
+  .tabdesc { margin: 6px 2px 0; }
+  section { background: var(--card); border-radius: 10px; padding: 12px 14px; margin: 10px 0; }
+  section.off { opacity: .45; pointer-events: none; }
+  h3 { margin: 0 0 8px; font-size: 14px; display: flex; align-items: center; gap: 8px; }
+  h3 .n { display: inline-flex; width: 22px; height: 22px; border-radius: 50%; background: var(--accent); color: var(--accent-fg); align-items: center; justify-content: center; font-size: 12px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 6px 0; }
+  .grow { flex: 1; }
+  button { font: inherit; cursor: pointer; }
+  button:disabled { opacity: .45; cursor: default; }
+  .act { padding: 8px 16px; border-radius: 18px; border: none; background: var(--accent); color: var(--accent-fg); font-weight: 600; }
+  .sec { padding: 5px 11px; border-radius: 14px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); font-size: 12.5px; }
+  .icon { width: 28px; padding: 4px 0; text-align: center; }
+  .close { background: none; border: none; font-size: 22px; color: var(--muted); line-height: 1; }
+  input[type=text] { width: 200px; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); font: inherit; }
+  .meta { display: grid; grid-template-columns: auto 1fr; gap: 6px 10px; align-items: center; margin: 4px 0 10px; }
+  input[type=number] { width: 78px; padding: 4px 6px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); font: inherit; }
+  select { padding: 4px 6px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); font: inherit; max-width: 100%; }
+  label.chk { display: flex; gap: 8px; align-items: flex-start; margin: 6px 0; }
+  video { display: block; width: 100%; max-height: 260px; background: #000; border-radius: 8px; }
+  .thumb { width: 150px; height: 150px; object-fit: contain; border-radius: 8px; background: repeating-conic-gradient(#bbb 0 25%, #eee 0 50%) 50% / 18px 18px; }
+  .track { position: relative; height: 34px; margin: 12px 8px 6px; background: var(--line); border-radius: 6px; cursor: pointer; touch-action: none; user-select: none; }
+  .track.audio { height: 48px; }
+  .track canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  .track .sel { position: absolute; top: 0; bottom: 0; background: rgba(0,168,132,.35); border-top: 2px solid var(--accent); border-bottom: 2px solid var(--accent); pointer-events: none; }
+  .track .handle { position: absolute; top: -5px; bottom: -5px; width: 14px; margin-left: -7px; background: var(--accent); border-radius: 4px; cursor: ew-resize; }
+  .track .handle::after { content: ""; position: absolute; left: 4px; top: 10px; bottom: 10px; width: 4px; border-left: 1px solid rgba(255,255,255,.8); border-right: 1px solid rgba(255,255,255,.8); }
+  .track .ph { position: absolute; top: -8px; bottom: -8px; width: 2px; margin-left: -1px; background: var(--fg); pointer-events: none; }
+  .times { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); margin: 0 8px; }
+  .trim { display: grid; grid-template-columns: auto auto 1fr; gap: 6px 10px; align-items: center; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 16px; overflow: hidden; }
+  .seg button { border: none; padding: 5px 12px; background: var(--bg); color: var(--fg); font-size: 12.5px; }
+  .seg button.on { background: var(--accent); color: var(--accent-fg); }
+  .summary { background: var(--bg); border-radius: 8px; padding: 8px 10px; margin: 6px 0; font-size: 13px; }
+  table.grid { border-collapse: separate; border-spacing: 3px; margin: 6px 0; font-size: 11.5px; }
+  table.grid th { color: var(--muted); font-weight: 600; padding: 2px 4px; text-align: center; }
+  table.grid th.side { text-align: right; }
+  table.grid td button { width: 52px; padding: 5px 0; border-radius: 6px; border: 1px solid transparent; font-size: 11.5px; background: transparent; color: var(--no); }
+  table.grid td button.ok { background: var(--ok-bg); color: var(--fg); }
+  table.grid td button.baja { background: var(--warn-bg); color: var(--fg); }
+  table.grid td button.no, table.grid td button.fuera { cursor: default; opacity: .6; }
+  table.grid td button.sel { border-color: var(--fg); font-weight: 700; }
+  .legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 11.5px; color: var(--muted); }
+  .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -2px; margin-right: 4px; }
+  .stale { color: var(--warn); font-size: 12.5px; font-weight: 600; }
+  .bar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; margin-top: 8px; }
+  .bar > div { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+  .status { font-size: 13px; margin: 6px 0 0; min-height: 18px; }
+  .status.err { color: var(--err); font-weight: 600; }
+  .result { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+  details { margin-top: 8px; }
+  summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
+  .logbox { max-height: 150px; overflow: auto; font: 11px/1.35 ui-monospace, Consolas, monospace; background: var(--bg); padding: 6px 8px; border-radius: 6px; white-space: pre-wrap; margin-top: 6px; }
+  .logbox .e { color: var(--err); } .logbox .w { color: var(--warn); }
+  `;
+
+  function h(tag, props, ...children) {
+    const el = document.createElement(tag);
+    if (props) {
+      for (const [k, v] of Object.entries(props)) {
+        if (k === "class") el.className = v;
+        else if (k === "style") el.style.cssText = v;
+        else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+        else if (k in el) el[k] = v;
+        else el.setAttribute(k, v);
+      }
+    }
+    for (const c of children.flat()) if (c != null) el.append(c.nodeType ? c : document.createTextNode(String(c)));
+    return el;
+  }
+
+  function attachStyles(root) {
+    try {
+      const sheet = new CSSStyleSheet();
+      sheet.replaceSync(CSS);
+      root.adoptedStyleSheets = [sheet];
+    } catch (e) {
+      log("warn", "ui:estilos-fallback", e);
+      root.append(h("style", { textContent: CSS }));
+    }
+  }
+
+  function download(blob, name) {
+    const a = h("a", { href: URL.createObjectURL(blob), download: name });
+    document.body.append(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
+  }
+
+  async function saveLog() {
+    const stored = await WAAS.getStoredLog();
+    const entries = stored && stored.length ? stored : WAAS.entries;
+    const content = JSON.stringify({ exportado: new Date().toISOString(), version: WAAS.VERSION, ua: navigator.userAgent, entradas: entries }, null, 1);
+    const blob = new Blob([content], { type: "application/json" });
+    const name = "registro-stickers-con-sonido-" + new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19) + ".json";
+    if (window.showSaveFilePicker) {
+      try {
+        const handle = await window.showSaveFilePicker({ suggestedName: name, types: [{ description: "Registro JSON", accept: { "application/json": [".json"] } }] });
+        const w = await handle.createWritable();
+        await w.write(blob);
+        await w.close();
+        log("info", "registro:guardado", { nombre: handle.name, entradas: entries.length });
+        return;
+      } catch (e) {
+        if (e && e.name === "AbortError") return;
+        log("warn", "registro:selector-fallo", e);
+      }
+    }
+    download(blob, name);
+    log("info", "registro:descargado", { nombre: name, entradas: entries.length });
+  }
+  WAAS.saveLog = saveLog;
+
+  const fmtT = (t) => (t >= 60 ? Math.floor(t / 60) + ":" + (t % 60).toFixed(2).padStart(5, "0") : t.toFixed(2) + " s");
+  const fmtB = (b) => (b >= 1e6 ? (b / 1e6).toFixed(2) + " MB" : Math.round(b / 1000) + " KB");
+  const isDark = () => {
+    try {
+      return document.body.classList.contains("dark") || document.documentElement.classList.contains("dark") ||
+        matchMedia("(prefers-color-scheme: dark)").matches;
+    } catch (e) { return false; }
+  };
+  const store = {
+    get(k, def) { try { const v = localStorage.getItem(k); return v == null ? def : JSON.parse(v); } catch (e) { return def; } },
+    set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* sin almacenamiento */ } },
+  };
+  const baseName = (f) => (f && f.name.replace(/\.[^.]+$/, "")) || "sticker";
+
+  function mount() {
+    if (document.getElementById("waas-root")) return;
+    const host = h("div", { id: "waas-root" });
+    document.body.append(host);
+    const root = host.attachShadow({ mode: "open" });
+    attachStyles(root);
+
+    // Estado compartido: solo puede haber una operación a la vez en todo el panel.
+    const G = { busy: false, forms: [], refreshTabs: () => {} };
+    const setBusy = (b) => { G.busy = b; G.forms.forEach((f) => f.refresh()); G.refreshTabs(); };
+    const run = async (name, fn) => {
+      const ac = new AbortController();
+      G.abort = ac;
+      setBusy(true);
+      try { return await WAAS.run(name, () => fn(ac.signal)); } finally { G.abort = null; setBusy(false); }
+    };
+
+    // ============================================================ línea de tiempo con asas
+    // kind "video": muestra el video y salta al cuadro donde quedan las asas.
+    // kind "audio": muestra la forma de onda; el reproductor queda oculto.
+    function makeTrimmer(kind, hint) {
+      const isVideo = kind === "video";
+      const media = isVideo ? h("video", { playsInline: true, preload: "auto" }) : h("audio", { preload: "auto" });
+      const wave = isVideo ? null : h("canvas");
+      const selBar = h("div", { class: "sel" });
+      const hS = h("div", { class: "handle", title: "Inicio del tramo (arrastra)" });
+      const hE = h("div", { class: "handle", title: "Fin del tramo (arrastra)" });
+      const ph = h("div", { class: "ph" });
+      const track = h("div", { class: "track" + (isVideo ? "" : " audio"), title: "Haz clic o arrastra para moverte" }, wave, selBar, ph, hS, hE);
+      const tLeft = h("span"), tRight = h("span");
+      const playSegBtn = h("button", { class: "sec", textContent: "▶ Tramo" });
+      const playCurBtn = h("button", { class: "sec", textContent: "▶ Desde el cursor" });
+      const playEndBtn = h("button", { class: "sec", textContent: "▶ Final del tramo" });
+      const curLbl = h("span", { class: "muted grow", style: "text-align:right" });
+      const startNum = h("input", { type: "number", min: 0, step: 0.01 });
+      const endNum = h("input", { type: "number", min: 0, step: 0.01 });
+      const startCur = h("button", { class: "sec", textContent: "⤓ cursor", title: "Usar la posición del cursor como inicio" });
+      const endCur = h("button", { class: "sec", textContent: "⤓ cursor", title: "Usar la posición del cursor como fin" });
+      const lenLbl = h("span", { class: "muted" });
+      const t = { start: 0, end: 0, playhead: 0, stopAt: null, dur: 0, offset: 0, url: null, peaks: null, peakMax: 1, muted: false };
+      const listeners = new Set();
+      const emit = () => listeners.forEach((fn) => fn());
+      const mkStep = (txt, title, fn) => h("button", { class: "sec icon", textContent: txt, title, onclick: fn });
+      const el = h("div", null,
+        isVideo ? media : null, track, h("div", { class: "times" }, tLeft, tRight),
+        h("div", { class: "row" }, playSegBtn, playCurBtn, playEndBtn, curLbl),
+        h("div", { class: "trim" },
+          h("span", null, "Inicio"),
+          h("span", { class: "row", style: "margin:0" }, mkStep("−", "Un cuadro antes", () => setStart(t.start - FRAME)), startNum, mkStep("+", "Un cuadro después", () => setStart(t.start + FRAME))),
+          h("span", { class: "row", style: "margin:0" }, startCur),
+          h("span", null, "Fin"),
+          h("span", { class: "row", style: "margin:0" }, mkStep("−", "Un cuadro antes", () => setEnd(t.end - FRAME)), endNum, mkStep("+", "Un cuadro después", () => setEnd(t.end + FRAME))),
+          h("span", { class: "row", style: "margin:0" }, endCur, lenLbl)),
+        hint ? h("div", { class: "muted", style: "margin-top:6px" }, hint) : null);
+
+      const layout = () => {
+        const d = t.dur || 1;
+        const pct = (x) => Math.max(0, Math.min(100, (x / d) * 100)) + "%";
+        selBar.style.left = pct(t.start);
+        selBar.style.width = Math.max(0, ((t.end - t.start) / d) * 100) + "%";
+        hS.style.left = pct(t.start);
+        hE.style.left = pct(t.end);
+        ph.style.left = pct(t.playhead);
+        tLeft.textContent = "0 s";
+        tRight.textContent = fmtT(t.dur);
+        curLbl.textContent = "cursor " + fmtT(t.playhead);
+        if (root.activeElement !== startNum) startNum.value = t.start.toFixed(2);
+        if (root.activeElement !== endNum) endNum.value = t.end.toFixed(2);
+        lenLbl.textContent = "duración " + fmtT(t.end - t.start);
+      };
+
+      const drawWave = () => {
+        if (!wave) return;
+        const w = track.clientWidth, hh = track.clientHeight;
+        if (!w) return;
+        const dpr = window.devicePixelRatio || 1;
+        wave.width = Math.round(w * dpr); wave.height = Math.round(hh * dpr);
+        const ctx = wave.getContext("2d");
+        ctx.clearRect(0, 0, wave.width, wave.height);
+        if (!t.peaks) return;
+        ctx.fillStyle = getComputedStyle(track).getPropertyValue("--muted").trim() || "#667781";
+        const n = t.peaks.length, cols = wave.width, mid = wave.height / 2, norm = 1 / (t.peakMax || 1);
+        for (let x = 0; x < cols; x++) {
+          const a = Math.floor((x / cols) * n), b = Math.max(a + 1, Math.floor(((x + 1) / cols) * n));
+          let p = 0;
+          for (let i = a; i < b && i < n; i++) if (t.peaks[i] > p) p = t.peaks[i];
+          const hgt = Math.max(1, p * norm * (wave.height - 4));
+          ctx.fillRect(x, mid - hgt / 2, 1, hgt);
+        }
+      };
+      if (wave && typeof ResizeObserver !== "undefined") new ResizeObserver(drawWave).observe(track);
+
+      // Saltos encadenados: el siguiente se pide cuando terminó el anterior (arrastre fluido).
+      let seeking = false, pendingSeek = null;
+      const seekTo = (x) => { pendingSeek = x; if (!seeking) doSeek(); };
+      const doSeek = () => {
+        if (pendingSeek == null) return;
+        const x = pendingSeek; pendingSeek = null; seeking = true;
+        t.playhead = x;
+        media.currentTime = t.offset + x;
+        layout();
+      };
+      media.addEventListener("seeked", () => { seeking = false; if (pendingSeek != null) doSeek(); });
+
+      const changed = () => { layout(); emit(); };
+      const setStart = (x, seek = true) => {
+        if (!t.dur) return;
+        t.start = Math.max(0, Math.min(x, t.end - MIN_LEN));
+        changed();
+        if (seek) { stop(); seekTo(t.start); }
+      };
+      const setEnd = (x, seek = true) => {
+        if (!t.dur) return;
+        t.end = Math.min(t.dur, Math.max(x, t.start + MIN_LEN));
+        changed();
+        if (seek) { stop(); seekTo(Math.max(t.start, t.end - FRAME)); }
+      };
+
+      const tAt = (ev) => {
+        const r = track.getBoundingClientRect();
+        return Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width)) * t.dur;
+      };
+      let drag = null;
+      track.addEventListener("pointerdown", (ev) => {
+        if (!t.dur || G.busy) return;
+        drag = ev.target === hS ? "s" : ev.target === hE ? "e" : "p";
+        track.setPointerCapture(ev.pointerId);
+        stop();
+        applyDrag(ev);
+      });
+      track.addEventListener("pointermove", (ev) => { if (drag) applyDrag(ev); });
+      const endDrag = () => { drag = null; };
+      track.addEventListener("pointerup", endDrag);
+      track.addEventListener("pointercancel", endDrag);
+      const applyDrag = (ev) => {
+        const x = tAt(ev);
+        if (drag === "s") setStart(x);
+        else if (drag === "e") setEnd(x);
+        else seekTo(x);
+      };
+      startNum.addEventListener("change", () => setStart(+startNum.value || 0));
+      endNum.addEventListener("change", () => setEnd(+endNum.value || 0));
+      startCur.addEventListener("click", () => setStart(t.playhead));
+      endCur.addEventListener("click", () => setEnd(t.playhead));
+
+      let raf = 0;
+      const tick = () => {
+        t.playhead = Math.max(0, media.currentTime - t.offset);
+        layout();
+        if (t.stopAt != null && media.currentTime >= t.offset + t.stopAt) { stop(); return; }
+        if (!media.paused) raf = requestAnimationFrame(tick);
+      };
+      function stop() {
+        cancelAnimationFrame(raf);
+        if (!media.paused) media.pause();
+        t.stopAt = null;
+      }
+      const play = (from, to, muted = t.muted) => {
+        stop();
+        t.stopAt = to;
+        media.muted = muted;
+        seeking = false; pendingSeek = null;
+        media.currentTime = t.offset + from;
+        return media.play().then(() => { raf = requestAnimationFrame(tick); }).catch((e) => log("warn", "ui:reproducir", e));
+      };
+      const toggleRange = (from, to) => { if (!media.paused) stop(); else play(from, to); };
+      playSegBtn.addEventListener("click", () => toggleRange(t.start, t.end));
+      playCurBtn.addEventListener("click", () => toggleRange(t.playhead >= t.start && t.playhead < t.end - 0.1 ? t.playhead : t.start, t.end));
+      playEndBtn.addEventListener("click", () => toggleRange(Math.max(t.start, t.end - 2), t.end));
+
+      const load = (file, { duration, offset = 0, peaks = null, peakMax = 1 }) => {
+        stop();
+        if (t.url) URL.revokeObjectURL(t.url);
+        t.url = URL.createObjectURL(file);
+        Object.assign(t, { dur: duration, offset, start: 0, end: Math.min(duration, DEFAULT_LEN), playhead: 0, peaks, peakMax });
+        media.addEventListener("loadeddata", () => seekTo(0), { once: true });
+        media.src = t.url;
+        changed();
+        requestAnimationFrame(drawWave);
+      };
+      const clear = () => {
+        stop();
+        if (t.url) URL.revokeObjectURL(t.url);
+        t.url = null;
+        media.removeAttribute("src");
+        Object.assign(t, { dur: 0, start: 0, end: 0, playhead: 0, peaks: null });
+        changed();
+        drawWave();
+      };
+
+      layout();
+      return {
+        el, media, load, clear, stop, play, layout, drawWave,
+        onChange: (fn) => listeners.add(fn),
+        setMuted: (m) => { t.muted = m; media.muted = m; },
+        get loaded() { return t.dur > 0; },
+        get start() { return t.start; },
+        get end() { return t.end; },
+        get len() { return t.end - t.start; },
+        get key() { return t.start.toFixed(3) + "-" + t.end.toFixed(3); },
+      };
+    }
+
+    // ============================================================ secciones comunes
+    const section = (n, title, ...body) => h("section", { class: "off" }, h("h3", null, h("span", { class: "n" }, String(n)), title), ...body);
+
+    // Selector de archivo: botón + texto de estado.
+    function makePicker(label, accept, hint) {
+      const input = h("input", { type: "file", accept, style: "display:none" });
+      const btn = h("button", { class: "act", textContent: label });
+      const info = h("span", { class: "muted" }, hint);
+      btn.addEventListener("click", () => input.click());
+      return {
+        el: h("div", { class: "row" }, btn, info, input), btn, info,
+        onPick: (fn) => input.addEventListener("change", () => {
+          const f = input.files && input.files[0];
+          input.value = "";
+          if (f) fn(f);
+        }),
+      };
+    }
+
+    // Sección de audio aparte (pestañas 2 y 3): archivo + tramo con forma de onda.
+    function makeAudioSource(onChange) {
+      const picker = makePicker("Elegir audio…", "audio/*,video/*,.mp3,.m4a,.aac,.ogg,.opus,.wav,.flac,.mp4,.mov,.webm",
+        "MP3, M4A, OGG, WAV… o un video del que tomar el sonido.");
+      const trimmer = makeTrimmer("audio", "Elige de dónde a dónde suena. Arrastra las asas o escribe los segundos.");
+      const wrap = h("div", { style: "display:none" }, trimmer.el);
+      const s = { file: null };
+      picker.onPick(async (f) => {
+        picker.info.textContent = "Leyendo " + f.name + "…";
+        await run("audio", async () => {
+          try {
+            const a = await WAAS.probeAudio(f);
+            s.file = f;
+            trimmer.load(f, { duration: a.duration, peaks: a.peaks, peakMax: a.peakMax });
+            wrap.style.display = "";
+            picker.info.textContent = `${f.name} · ${fmtT(a.duration)}${a.peakMax < 0.001 ? " · parece no tener sonido" : ""}`;
+            log("info", "ui:audio-elegido", { nombre: f.name, tipo: f.type, bytes: f.size, duracion: a.duration, canales: a.channels, pico: +a.peakMax.toFixed(4) });
+          } catch (e) {
+            log("error", "ui:audio-error", e);
+            picker.info.textContent = "No se pudo leer: " + e.message;
+            s.file = null;
+            trimmer.clear();
+            wrap.style.display = "none";
+          }
+        });
+        onChange();
+      });
+      trimmer.onChange(onChange);
+      return {
+        els: [picker.el, wrap], trimmer, picker,
+        get ready() { return !!s.file && trimmer.loaded; },
+        get params() { return s.file ? { file: s.file, start: trimmer.start, dur: trimmer.len } : null; },
+        get key() { return s.file ? s.file.name + s.file.size + "|" + trimmer.key : ""; },
+      };
+    }
+
+    // Formato: encuadre + (opcional) tabla de resolución × fps.
+    // getParams() devuelve { visual, audio, fit } o null si faltan datos.
+    function makeFormat({ getParams, grid = true, sync = true, still = false, extras = [] }) {
+      const f = { mode: "ajustar", an: null, anKey: null, sel: null };
+      const segAjustar = h("button", { textContent: "Ajustar (bordes transparentes)", class: "on" });
+      const segRecortar = h("button", { textContent: "Recortar (llenar el cuadro)" });
+      const calcBtn = h("button", { class: "act", textContent: "Calcular opciones" });
+      const calcInfo = h("span", { class: "muted" });
+      const staleLbl = h("div", { class: "stale", style: "display:none" }, "Algo cambió: vuelve a calcular las opciones.");
+      // Barra propia del cálculo (la de "Crear y enviar" es solo para crear).
+      const calcBarIn = h("div");
+      const calcBar = h("div", { class: "bar", style: "display:none" }, calcBarIn);
+      const gridHost = h("div");
+      const selLbl = h("div", { class: "row", style: "font-weight:600" });
+      const legend = h("div", { class: "legend" },
+        h("span", null, h("i", { style: "background:var(--ok-bg);border:1px solid var(--ok)" }), "cabe"),
+        h("span", null, h("i", { style: "background:var(--warn-bg);border:1px solid var(--warn)" }), "cabe bajando la calidad"),
+        h("span", null, h("i", { style: "border:1px solid var(--line)" }), "✕ supera 1 MB (WhatsApp lo rechaza)"),
+        h("span", null, "★ recomendada · valores en KB"));
+      const syncNum = h("input", { type: "number", min: 0, max: 1000, step: 10, value: store.get("waas-compensacion-ms", 0) });
+      syncNum.addEventListener("change", () => { store.set("waas-compensacion-ms", +syncNum.value || 0); api.onUpdate(); });
+      const stillChk = h("input", { type: "checkbox", onchange: () => api.onUpdate() });
+      const advRows = [];
+      if (sync) advRows.push(h("div", { class: "row" }, h("span", null, "Compensar desfase (ms)"), syncNum,
+        h("span", { class: "muted" }, "Normalmente 0. Si en algún celular el audio va atrasado, la imagen esperará este tiempo.")));
+      if (still) advRows.push(h("label", { class: "chk" }, stillChk, h("span", null, "Enviar como imagen fija (experimental)",
+        h("div", { class: "muted" }, "Por defecto la imagen se envía como un sticker animado de un solo cuadro que dura lo que el audio, igual que los stickers con sonido conocidos. Marca esto para probar si WhatsApp también acepta el sonido en un sticker fijo."))));
+      const advanced = advRows.length ? h("details", null, h("summary", null, "Avanzado"), ...advRows) : null;
+
+      // Clave del análisis: solo lo que cambia los cuadros del sticker. El audio se sube aparte (no
+      // suma al peso del sticker), así que solo cuenta su duración cuando la animación se ajusta a él.
+      const fileId = (x) => (x ? x.name + "|" + x.size + "|" + x.lastModified : "");
+      const key = () => {
+        const p = getParams();
+        if (!p) return null;
+        const v = p.visual;
+        const followsAudio = v.kind === "image" || p.fit !== "independiente";
+        return JSON.stringify([v.kind, fileId(v.file), v.start, v.dur, followsAudio ? p.fit : "", followsAudio ? +p.audio.dur.toFixed(3) : "", f.mode]);
+      };
+      // Clave del resultado: todo lo que cambia el sticker o su audio (el paquete y el autor se aplican al enviar).
+      const fullKey = () => {
+        const p = getParams();
+        if (!p) return null;
+        return JSON.stringify([key(), fileId(p.audio.file), +p.audio.start.toFixed(3), +p.audio.dur.toFixed(3), p.fit, f.sel, api.options()]);
+      };
+      const fresh = () => !!f.an && f.anKey === key();
+      const CALC_HINT = "Lee el tramo una vez y estima el peso de cada combinación.";
+      const reset = () => { if (f.an) WAAS.release(f.an); f.an = null; f.sel = null; gridHost.textContent = ""; selLbl.textContent = ""; calcInfo.textContent = CALC_HINT; };
+      calcInfo.textContent = CALC_HINT;
+
+      const renderGrid = () => {
+        gridHost.textContent = "";
+        const an = f.an;
+        if (!an) return;
+        const L = WAAS.limits;
+        const thead = h("tr", null, h("th", { class: "side" }, "px \\ fps"), L.FPS_LIST.map((x) => h("th", null, String(x))));
+        const rows = L.SIDES.map((side) => h("tr", null, h("th", { class: "side" }, String(side)), L.FPS_LIST.map((fps) => {
+          const c = an.cells.find((x) => x.side === side && x.fps === fps);
+          const isAuto = an.auto && an.auto.side === side && an.auto.fps === fps;
+          const isSel = f.sel && f.sel.side === side && f.sel.fps === fps;
+          const can = !!c && (c.estado === "ok" || c.estado === "baja");
+          const label = !c || c.estado === "fuera" ? "·" : c.estado === "no" ? "✕" : (isAuto ? "★" : "") + Math.round(c.est / 1000);
+          const title = !c || c.estado === "fuera" ? "No disponible para este tramo"
+            : c.estado === "no" ? `≈ ${fmtB(c.estMin)} aun con la calidad mínima: supera 1 MB`
+            : c.estado === "baja" ? `≈ ${fmtB(c.est)} con la calidad normal: se bajará la calidad para que quepa`
+            : `≈ ${fmtB(c.est)}`;
+          return h("td", null, h("button", {
+            class: (c ? c.estado : "fuera") + (isSel ? " sel" : ""), textContent: label, title, disabled: !can,
+            onclick: () => { f.sel = { side, fps }; renderGrid(); api.onUpdate(); },
+          }));
+        })));
+        gridHost.append(h("table", { class: "grid" }, thead, rows));
+        const c = f.sel && an.cells.find((x) => x.side === f.sel.side && x.fps === f.sel.fps);
+        selLbl.textContent = c ? `Elegido: ${c.side} px · ${c.fps} fps · ≈ ${fmtB(c.est)}${c.estado === "baja" ? " (con menos calidad)" : ""}` : "Ninguna combinación cabe en 1 MB: acorta el tramo.";
+      };
+
+      segAjustar.addEventListener("click", () => { f.mode = "ajustar"; api.onUpdate(); });
+      segRecortar.addEventListener("click", () => { f.mode = "recortar"; api.onUpdate(); });
+      calcBtn.addEventListener("click", async () => {
+        const p = getParams();
+        if (!p) return;
+        reset();
+        const k = key();
+        api.onUpdate();
+        try {
+          const an = await run("analizar", (signal) => WAAS.analyze({
+            ...p, mode: f.mode, signal,
+            onProgress: (txt, frac) => { calcInfo.textContent = txt; api.setProgress(frac); },
+          }));
+          f.an = an; f.anKey = k;
+          f.sel = an.auto ? { side: an.auto.side, fps: an.auto.fps } : null;
+          calcInfo.textContent = `Listo en ${(an.ms / 1000).toFixed(1)} s. Elige una casilla (★ = recomendada).`;
+          renderGrid();
+        } catch (e) {
+          calcInfo.textContent = e.name === "AbortError" ? "Cancelado" : "Error: " + e.message;
+        }
+        api.setProgress(0);
+        api.onUpdate();
+      });
+
+      const body = [...extras, h("div", { class: "row" }, h("span", null, "Encuadre"), h("span", { class: "seg" }, segAjustar, segRecortar))];
+      if (grid) body.push(h("div", { class: "row" }, calcBtn, calcInfo), calcBar, staleLbl, gridHost, selLbl, legend);
+      if (advanced) body.push(advanced);
+
+      const api = {
+        body,
+        onUpdate: () => {},
+        setProgress: (frac) => { calcBar.style.display = frac > 0 ? "" : "none"; calcBarIn.style.width = Math.round(frac * 100) + "%"; },
+        refresh() {
+          const has = !!getParams();
+          const stale = !!f.an && !fresh();
+          staleLbl.style.display = stale ? "" : "none";
+          gridHost.style.opacity = stale ? ".35" : "";
+          gridHost.style.pointerEvents = stale ? "none" : "";
+          calcBtn.disabled = G.busy || !has;
+          segAjustar.disabled = segRecortar.disabled = G.busy;
+          segAjustar.classList.toggle("on", f.mode === "ajustar");
+          segRecortar.classList.toggle("on", f.mode === "recortar");
+        },
+        // ¿Se puede crear ya? Con tabla hace falta haber calculado y elegido una casilla.
+        get ready() { return grid ? fresh() && !!f.sel : !!getParams(); },
+        reset,
+        fullKey,
+        options: () => ({ syncMs: sync ? +syncNum.value || 0 : 0, still: still && stillChk.checked }),
+        // Devuelve el análisis y la combinación para crear. Sin tabla se analiza en el momento.
+        async prepare(signal, onProgress) {
+          const p = getParams();
+          if (grid) return { an: f.an, side: f.sel.side, fps: f.sel.fps, audio: p.audio, temp: false };
+          const an = await WAAS.analyze({ ...p, mode: f.mode, signal, onProgress });
+          return { an, side: an.auto.side, fps: an.auto.fps, audio: p.audio, temp: true };
+        },
+      };
+      return api;
+    }
+
+    // Crear y enviar: datos del paquete, creación, vista previa y envío.
+    function makeCreate({ fmt, getBase }) {
+      const META_KEY = "waas-metadatos";
+      const packInput = h("input", { type: "text", maxLength: 128, placeholder: "Ej.: Mis memes" });
+      const authorInput = h("input", { type: "text", maxLength: 128, placeholder: "Ej.: tu nombre o apodo" });
+      const loadMeta = () => { const m = store.get(META_KEY, {}) || {}; packInput.value = m.paquete || ""; authorInput.value = m.autor || ""; };
+      const saveMeta = () => store.set(META_KEY, { paquete: packInput.value, autor: authorInput.value });
+      loadMeta();
+      packInput.addEventListener("change", saveMeta);
+      authorInput.addEventListener("change", saveMeta);
+      const createBtn = h("button", { class: "act", textContent: "Crear sticker" });
+      const cancelBtn = h("button", { class: "sec", textContent: "Cancelar", style: "display:none" });
+      const barIn = h("div");
+      const status = h("div", { class: "status" });
+      const resImg = h("img", { class: "thumb", alt: "vista previa del sticker" });
+      const resAudio = h("audio", { controls: true });
+      const resInfo = h("div", { class: "muted", style: "max-width:380px" });
+      const togetherBtn = h("button", { class: "sec", textContent: "▶ Ver y oír juntos" });
+      const destSel = h("select", null,
+        h("option", { value: "abierto-solo", textContent: "Enviar al chat abierto" }),
+        h("option", { value: "abierto", textContent: "Enviar al chat abierto y abrir Reenviar" }),
+        h("option", { value: "propio", textContent: "Guardar en mi chat (Tú) y abrir Reenviar" }));
+      const sendBtn = h("button", { class: "act", textContent: "Enviar" });
+      const dlBtn = h("button", { class: "sec", textContent: "Descargar .webp y .ogg" });
+      const staleNote = h("div", { class: "stale", style: "display:none;margin-top:8px" },
+        "Cambiaste algo después de crear este sticker. Pulsa «Crear sticker con los cambios»; si lo envías ahora, se envía la versión anterior.");
+      const resultBox = h("div", { class: "result" }, resImg, h("div", null, resAudio, h("div", { class: "row" }, togetherBtn), resInfo));
+      const result = h("div", { style: "display:none" }, staleNote, resultBox,
+        h("div", { class: "row", style: "margin-top:10px" }, destSel, sendBtn, dlBtn));
+      const c = { result: null, key: null, urls: [] };
+      const setStatus = (txt, frac, isErr) => {
+        status.textContent = txt || "";
+        status.className = "status" + (isErr ? " err" : "");
+        if (frac != null) barIn.style.width = Math.round(frac * 100) + "%";
+      };
+      const revoke = () => { c.urls.forEach((u) => URL.revokeObjectURL(u)); c.urls = []; };
+      const clear = () => { c.result = null; c.key = null; result.style.display = "none"; revoke(); setStatus("", 0); };
+
+      createBtn.addEventListener("click", async () => {
+        if (!fmt.ready) return;
+        result.style.display = "none";
+        try {
+          const k = fmt.fullKey();
+          const res = await run("crear", async (signal) => {
+            const p = await fmt.prepare(signal, (t, f) => setStatus(t, f * 0.3));
+            try {
+              return await WAAS.create(p.an, {
+                side: p.side, fps: p.fps, audio: p.audio, ...fmt.options(),
+                packName: packInput.value, publisher: authorInput.value,
+                onProgress: (t, f) => setStatus(t, f), signal,
+              });
+            } finally {
+              if (p.temp) WAAS.release(p.an);
+            }
+          });
+          c.result = res;
+          c.key = k;
+          revoke();
+          const u1 = URL.createObjectURL(res.webp), u2 = URL.createObjectURL(res.ogg);
+          c.urls.push(u1, u2);
+          resImg.src = u1; resAudio.src = u2;
+          const i = res.info;
+          const durTxt = Math.abs(i.duracion - i.duracionAudio) > 0.05 ? `imagen ${fmtT(i.duracion)} · audio ${fmtT(i.duracionAudio)}` : fmtT(i.duracion);
+          resInfo.textContent = `${durTxt} · ${i.lado} px${i.fps ? " · " + i.fps + " fps" : ""}${i.isAnimated ? "" : " · fijo"} · calidad ${Math.round(i.calidad * 100)} · sticker ${fmtB(i.webpBytes)}${i.estimado ? " (estimado " + fmtB(i.estimado) + ")" : ""} · audio ${fmtB(i.oggBytes)} a ${i.audioKbps} kbps`;
+          result.style.display = "";
+          setStatus("Sticker listo. Revisa la vista previa y envíalo.", 1);
+        } catch (e) {
+          setStatus(e.name === "AbortError" ? "Cancelado" : "Error: " + e.message, 0, e.name !== "AbortError");
+        }
+        // run() desbloquea el panel antes de que el resultado quede guardado: se refresca otra vez aquí
+        // (sin esto, el botón Enviar quedaba gris hasta cambiar de pestaña).
+        api.onUpdate();
+      });
+      cancelBtn.addEventListener("click", () => { if (G.abort) G.abort.abort(); });
+
+      // Reproduce la animación desde el principio junto con el audio, como al tocar el sticker.
+      togetherBtn.addEventListener("click", () => {
+        if (!c.result) return;
+        const u = resImg.src;
+        resImg.src = "";
+        resImg.src = u;
+        resAudio.currentTime = 0;
+        resAudio.play().catch((e) => log("warn", "ui:reproducir", e));
+      });
+
+      sendBtn.addEventListener("click", async () => {
+        if (!c.result) return;
+        const dest = destSel.value;
+        try {
+          await run("enviar", async () => {
+            // Aplica el paquete y el autor escritos ahora (pueden haber cambiado después de crear).
+            const i = c.result.info;
+            if (packInput.value.trim() !== (i.paquete || "") || authorInput.value.trim() !== (i.autor || "")) {
+              c.result.webp = await WAAS.retagWebp(c.result.webp, { packName: packInput.value, publisher: authorInput.value, soundSha: i.soundSha256 });
+              i.paquete = packInput.value.trim(); i.autor = authorInput.value.trim();
+              log("info", "metadatos:actualizados", { paquete: i.paquete, autor: i.autor, webpBytes: c.result.webp.size });
+            }
+            saveMeta();
+            await WAAS.wa.publish(c.result, {
+              destino: dest === "propio" ? "propio" : "abierto",
+              abrirReenviar: dest !== "abierto-solo",
+              onProgress: (t) => setStatus(t),
+            });
+          });
+          setStatus(dest === "abierto-solo" ? "Enviado." : "Enviado. Elige en el diálogo los chats a los que reenviarlo.", 1);
+          api.onSent();
+        } catch (e) {
+          setStatus("Error al enviar: " + e.message, 0, true);
+        }
+      });
+      dlBtn.addEventListener("click", () => {
+        if (!c.result) return;
+        const base = getBase();
+        download(c.result.webp, base + ".webp");
+        download(c.result.ogg, base + ".ogg");
+        log("info", "ui:descarga-archivos", { base });
+      });
+
+      const api = {
+        body: [
+          h("div", null,
+            h("div", { class: "muted" }, "Datos del sticker (opcional): WhatsApp los muestra debajo del sticker. Se recuerdan."),
+            h("div", { class: "meta" }, h("span", null, "Paquete"), packInput, h("span", null, "Autor"), authorInput)),
+          h("div", { class: "row" }, createBtn, cancelBtn), h("div", { class: "bar" }, barIn), status, result,
+        ],
+        onSent: () => {},
+        onUpdate: () => {},
+        setStatus, clear, loadMeta,
+        get hasResult() { return !!c.result; },
+        refresh() {
+          const stale = !!c.result && c.key !== fmt.fullKey();
+          const done = !!c.result && !stale;
+          createBtn.textContent = done ? "✓ Sticker creado" : c.result ? "Crear sticker con los cambios" : "Crear sticker";
+          createBtn.disabled = G.busy || !fmt.ready || done;
+          staleNote.style.display = stale ? "" : "none";
+          resultBox.style.opacity = stale ? ".45" : "";
+          sendBtn.disabled = G.busy || !c.result;
+          cancelBtn.style.display = G.busy && api.isActive() ? "" : "none";
+        },
+        isActive: () => true,
+      };
+      return api;
+    }
+
+    // Arma un formulario completo a partir de sus secciones de origen.
+    function makeForm({ id, title, desc, sources, fmt, getBase, onShow, stop }) {
+      const create = makeCreate({ fmt, getBase });
+      let n = 0;
+      const secs = sources.map((s) => section(++n, s.title, ...s.body));
+      const secFmt = section(++n, "Formato", ...fmt.body);
+      const secCreate = section(++n, "Crear y enviar", ...create.body);
+      const el = h("div", { style: "display:none" }, h("div", { class: "muted tabdesc" }, desc), ...secs, secFmt, secCreate);
+      const form = {
+        id, title, el, create, stop,
+        refresh() {
+          sources.forEach((s, i) => secs[i].classList.toggle("off", G.busy || (s.enabled ? !s.enabled() : false)));
+          secFmt.classList.toggle("off", !sources.every((s) => s.ready()));
+          secCreate.classList.toggle("off", !fmt.ready && !create.hasResult);
+          fmt.refresh();
+          create.refresh();
+        },
+        show(on) { el.style.display = on ? "" : "none"; if (on) { create.loadMeta(); if (onShow) onShow(); } else stop(); },
+      };
+      fmt.onUpdate = () => form.refresh();
+      create.onUpdate = () => form.refresh();
+      create.isActive = () => el.style.display !== "none";
+      create.onSent = () => close(true);
+      return form;
+    }
+
+    // ============================================================ pestaña 1: video con su sonido
+    function videoForm() {
+      const picker = makePicker("Elegir video…", "video/*,.mov,.mp4,.webm,.mkv", "Cualquier video con sonido.");
+      const trimmer = makeTrimmer("video", "Arrastra las asas verdes: el video muestra el cuadro donde quedan. Haz clic o arrastra en la barra para mover el cursor.");
+      const s = { file: null };
+      const changed = () => form.refresh();
+      const fmt = makeFormat({
+        getParams: () => (s.file && trimmer.loaded ? {
+          visual: { kind: "video", file: s.file, start: trimmer.start, dur: trimmer.len },
+          audio: { file: s.file, start: trimmer.start, dur: trimmer.len }, fit: "repetir",
+        } : null),
+      });
+      picker.onPick(async (f) => {
+        trimmer.stop();
+        fmt.reset();
+        form.create.clear();
+        picker.info.textContent = "Leyendo " + f.name + "…";
+        await run("video", async () => {
+          try {
+            const meta = await WAAS.probeVideo(f);
+            s.file = f;
+            trimmer.load(f, meta);
+            picker.info.textContent = `${f.name} · ${fmtT(meta.duration)} · ${meta.width}×${meta.height}`;
+            log("info", "ui:video-elegido", { nombre: f.name, tipo: f.type, bytes: f.size, ...meta });
+          } catch (e) {
+            log("error", "ui:video-error", e);
+            picker.info.textContent = "No se pudo leer: " + e.message;
+            s.file = null;
+            trimmer.clear();
+          }
+        });
+        changed();
+      });
+      trimmer.onChange(changed);
+      const form = makeForm({
+        id: "video", title: "Video",
+        desc: "Un video con su propio sonido: se recorta el tramo y la imagen y el audio van juntos.",
+        sources: [
+          { title: "Video", body: [picker.el], ready: () => !!s.file },
+          { title: "Tramo", body: [trimmer.el], ready: () => trimmer.loaded, enabled: () => trimmer.loaded },
+        ],
+        fmt, getBase: () => baseName(s.file), stop: () => trimmer.stop(),
+      });
+      return form;
+    }
+
+    // ============================================================ pestaña 2: imagen + audio
+    function imageForm() {
+      const picker = makePicker("Elegir imagen…", "image/*", "JPG, PNG, WebP… (una foto, un dibujo, un meme).");
+      const thumb = h("img", { class: "thumb", alt: "imagen elegida", style: "display:none" });
+      const animNote = h("div", { class: "note", style: "display:none" }, "Es una imagen animada: aquí solo se usa su primer cuadro. Para que se mueva, usa la pestaña «Video o GIF + audio».");
+      const s = { file: null, url: null };
+      const changed = () => form.refresh();
+      const audio = makeAudioSource(changed);
+      const fmt = makeFormat({
+        grid: false, sync: false, still: true,
+        getParams: () => (s.file && audio.ready ? { visual: { kind: "image", file: s.file }, audio: audio.params, fit: "repetir" } : null),
+      });
+      picker.onPick(async (f) => {
+        form.create.clear();
+        picker.info.textContent = "Leyendo " + f.name + "…";
+        await run("imagen", async () => {
+          try {
+            const meta = await WAAS.probeImage(f);
+            s.file = f;
+            if (s.url) URL.revokeObjectURL(s.url);
+            s.url = URL.createObjectURL(f);
+            thumb.src = s.url; thumb.style.display = "";
+            animNote.style.display = meta.animated ? "" : "none";
+            picker.info.textContent = `${f.name} · ${meta.width}×${meta.height}`;
+            log("info", "ui:imagen-elegida", { nombre: f.name, tipo: f.type, bytes: f.size, ...meta });
+          } catch (e) {
+            log("error", "ui:imagen-error", e);
+            picker.info.textContent = "No se pudo leer: " + e.message;
+            s.file = null; thumb.style.display = "none"; animNote.style.display = "none";
+          }
+        });
+        changed();
+      });
+      const form = makeForm({
+        id: "imagen", title: "Imagen + audio",
+        desc: "Una imagen fija con el sonido que elijas. El sticker dura lo que dure el tramo de audio.",
+        sources: [
+          { title: "Imagen", body: [picker.el, thumb, animNote], ready: () => !!s.file },
+          { title: "Audio", body: audio.els, ready: () => audio.ready },
+        ],
+        fmt, getBase: () => baseName(s.file), stop: () => audio.trimmer.stop(),
+      });
+      return form;
+    }
+
+    // ============================================================ pestaña 3: video o GIF + otro audio
+    function mixForm() {
+      const picker = makePicker("Elegir video o GIF…", "video/*,image/gif,image/webp,image/apng,.gif,.mov,.mp4,.webm,.mkv",
+        "Un video (su sonido se ignora) o un GIF animado.");
+      const vTrim = makeTrimmer("video", "Elige el tramo de la animación. El sonido de este video no se usa.");
+      vTrim.setMuted(true);
+      const vWrap = h("div", { style: "display:none" }, vTrim.el);
+      const gifImg = h("img", { class: "thumb", alt: "GIF elegido", style: "display:none" });
+      const s = { file: null, kind: null, gif: null, url: null };
+      const changed = () => { updateSummary(); form.refresh(); };
+      const audio = makeAudioSource(changed);
+
+      const FIT_KEY = "waas-ajuste-duracion-v2";
+      const fitSel = h("select", null,
+        h("option", { value: "independiente", textContent: "Que cada uno dure lo suyo" }),
+        h("option", { value: "repetir", textContent: "Repetir la animación hasta que termine el audio" }),
+        h("option", { value: "congelar", textContent: "Dejar quieto el último cuadro hasta que termine el audio" }));
+      fitSel.value = store.get(FIT_KEY, "independiente");
+      fitSel.addEventListener("change", () => { store.set(FIT_KEY, fitSel.value); changed(); });
+      const summary = h("div", { class: "summary" });
+      const fitRow = h("div", null, h("div", { class: "row" }, h("span", null, "Si duran distinto"), fitSel));
+      const testBtn = h("button", { class: "sec", textContent: "▶ Probar juntos" });
+      const vDur = () => (s.kind === "gif" ? s.gif.duration : vTrim.len);
+
+      function updateSummary() {
+        summary.textContent = "";
+        if (!s.file || !audio.ready) { summary.append("Elige la animación y el audio para ver cuánto durará el sticker."); fitRow.style.display = "none"; return; }
+        const v = vDur(), a = audio.params.dur;
+        const same = Math.abs(v - a) < 0.05;
+        fitRow.style.display = same ? "none" : "";
+        if (same) { summary.append(`Animación y audio duran lo mismo: ${fmtT(a)}.`); return; }
+        const fit = fitSel.value;
+        let txt = `Animación ${fmtT(v)} · audio ${fmtT(a)}. `;
+        if (fit === "independiente") txt += "Cada uno conserva su duración: al tocar el sticker, la animación y el audio empiezan juntos y terminan por separado. Cambiar el audio no obliga a recalcular las opciones.";
+        else if (v > a) txt += `La animación es más larga: se corta a ${fmtT(a)}.`;
+        else if (fit === "repetir") txt += `El sticker dura ${fmtT(a)}: la animación se repite ${(a / v).toFixed(1).replace(".", ",")} veces.`;
+        else txt += `El sticker dura ${fmtT(a)}: la animación se detiene en su último cuadro a los ${fmtT(v)}.`;
+        summary.append(txt);
+      }
+
+      testBtn.addEventListener("click", () => {
+        if (!s.file || !audio.ready) return;
+        const a = audio.params;
+        if (s.kind === "gif") { const u = gifImg.src; gifImg.src = ""; gifImg.src = u; }
+        else vTrim.play(vTrim.start, vTrim.end, true);
+        audio.trimmer.play(a.start, a.start + a.dur, false);
+      });
+
+      const fmt = makeFormat({
+        extras: [summary, fitRow, h("div", { class: "row" }, testBtn, h("span", { class: "muted" }, "Vista previa: la animación se reproduce una vez, como en WhatsApp."))],
+        getParams: () => {
+          if (!s.file || !audio.ready) return null;
+          const visual = s.kind === "gif" ? { kind: "gif", file: s.file, start: 0, dur: s.gif.duration } : { kind: "video", file: s.file, start: vTrim.start, dur: vTrim.len };
+          return { visual, audio: audio.params, fit: fitSel.value };
+        },
+      });
+
+      picker.onPick(async (f) => {
+        vTrim.stop();
+        fmt.reset();
+        form.create.clear();
+        picker.info.textContent = "Leyendo " + f.name + "…";
+        await run("animacion", async () => {
+          try {
+            if (s.url) { URL.revokeObjectURL(s.url); s.url = null; }
+            if (WAAS.isAnimationFile(f) || (f.type || "").startsWith("image/")) {
+              const g = await WAAS.probeAnimation(f);
+              if (!g.animated) throw new Error("es una imagen fija. Usa la pestaña «Imagen + audio».");
+              s.file = f; s.kind = "gif"; s.gif = g;
+              s.url = URL.createObjectURL(f);
+              gifImg.src = s.url; gifImg.style.display = ""; vWrap.style.display = "none";
+              vTrim.clear();
+              picker.info.textContent = `${f.name} · ${fmtT(g.duration)} · ${g.frames} cuadros · ${g.width}×${g.height} · se usa completo`;
+              log("info", "ui:gif-elegido", { nombre: f.name, tipo: f.type, bytes: f.size, cuadros: g.frames, duracion: g.duration, ancho: g.width, alto: g.height });
+            } else {
+              const meta = await WAAS.probeVideo(f);
+              s.file = f; s.kind = "video"; s.gif = null;
+              vTrim.load(f, meta);
+              vWrap.style.display = ""; gifImg.style.display = "none";
+              picker.info.textContent = `${f.name} · ${fmtT(meta.duration)} · ${meta.width}×${meta.height}`;
+              log("info", "ui:video-elegido", { nombre: f.name, tipo: f.type, bytes: f.size, sinSuAudio: true, ...meta });
+            }
+          } catch (e) {
+            log("error", "ui:animacion-error", e);
+            picker.info.textContent = "No se pudo usar: " + e.message;
+            s.file = null; s.kind = null; s.gif = null;
+            vTrim.clear(); vWrap.style.display = "none"; gifImg.style.display = "none";
+          }
+        });
+        changed();
+      });
+      vTrim.onChange(changed);
+      updateSummary();
+
+      const form = makeForm({
+        id: "mezcla", title: "Video o GIF + audio",
+        desc: "Una animación (video sin su sonido, o un GIF) con el audio que elijas.",
+        sources: [
+          { title: "Animación", body: [picker.el, vWrap, gifImg], ready: () => !!s.file },
+          { title: "Audio", body: audio.els, ready: () => audio.ready },
+        ],
+        fmt, getBase: () => baseName(s.file),
+        stop: () => { vTrim.stop(); audio.trimmer.stop(); },
+      });
+      return form;
+    }
+
+    // ============================================================ panel
+    G.forms = [videoForm(), imageForm(), mixForm()];
+    const TAB_KEY = "waas-pestana";
+    let active = Math.max(0, G.forms.findIndex((f) => f.id === store.get(TAB_KEY, "video")));
+    const tabBtns = G.forms.map((f, i) => h("button", { textContent: f.title, onclick: () => selectTab(i) }));
+    function selectTab(i) {
+      if (G.busy) return;
+      active = i;
+      store.set(TAB_KEY, G.forms[i].id);
+      G.forms.forEach((f, j) => f.show(j === i));
+      G.refreshTabs();
+      G.forms[i].refresh();
+      log("info", "ui:pestana", { pestana: G.forms[i].id });
+    }
+    G.refreshTabs = () => tabBtns.forEach((b, i) => { b.classList.toggle("on", i === active); b.disabled = G.busy && i !== active; });
+
+    const logBox = h("div", { class: "logbox" });
+    const tools = h("details", null, h("summary", null, "Herramientas de prueba (registro, diagnóstico)"),
+      h("div", { class: "row" },
+        h("button", { class: "sec", textContent: "Diagnóstico", onclick: () => WAAS.wa.diagnose().catch((e) => log("error", "diagnostico:error", e)) }),
+        h("button", { class: "sec", textContent: "Guardar registro…", onclick: () => saveLog().catch((e) => log("error", "registro:error", e)) }),
+        h("button", { class: "sec", textContent: "Ver registro completo", onclick: () => WAAS.saveLog().catch((e) => log("error", "registro:error", e)) })),
+      logBox);
+
+    const closeBtn = h("button", { class: "close", title: "Cerrar", textContent: "×" });
+    const panel = h("div", { class: "panel" },
+      h("header", null, h("div", null, h("h2", null, "Stickers con sonido"), h("div", { class: "muted" }, "Versión " + WAAS.VERSION + " · todo se procesa en tu navegador · máximo 1 MB por sticker")),
+        h("div", { class: "hdr-r" },
+          h("a", { class: "kofi", href: "https://ko-fi.com/shirtep", target: "_blank", rel: "noopener", title: "La extensión es gratis. Si te sirve, puedes apoyar el proyecto en Ko-fi.", textContent: "☕ Apoyar" }),
+          closeBtn)),
+      h("nav", { class: "tabs" }, tabBtns),
+      G.forms.map((f) => f.el), tools);
+    const overlay = h("div", { class: "overlay", style: "display:none" }, panel);
+    root.append(overlay);
+
+    const showEntry = (e) => {
+      logBox.append(h("div", { class: e.level === "error" ? "e" : e.level === "warn" ? "w" : "" },
+        e.ts.slice(11, 19) + " " + e.event + (e.data != null ? " " + JSON.stringify(e.data).slice(0, 260) : "")));
+      while (logBox.childNodes.length > 200) logBox.firstChild.remove();
+      logBox.scrollTop = logBox.scrollHeight;
+    };
+    WAAS.entries.slice(-30).forEach(showEntry);
+    WAAS.onLog(showEntry);
+
+    const open = () => {
+      panel.classList.toggle("dark", isDark());
+      overlay.style.display = "";
+      G.forms[active].show(true);
+      log("info", "ui:abrir", null);
+    };
+    function close(force) {
+      if (G.busy && force !== true) return;
+      G.forms.forEach((f) => f.stop());
+      overlay.style.display = "none";
+    }
+    const toggle = () => (overlay.style.display === "none" ? open() : close());
+    window.addEventListener("message", (ev) => {
+      if (ev.source === window && ev.data && ev.data.__waas === "togglePanel") toggle();
+    });
+    WAAS.togglePanel = toggle;
+    closeBtn.addEventListener("click", close);
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+
+    selectTab(active);
+    log("info", "ui:montada", null);
+    window.postMessage({ __waas: "uiReady" }, location.origin);
+  }
+
+  WAAS.mountUI = mount;
+})();
+
+
+/* ===== bundled original: src/main.js ===== */
+// Arranque: espera a que WhatsApp Web termine de cargar, registra un diagnóstico y monta el botón.
+(() => {
+  const WAAS = window.WAAS;
+  if (!WAAS || WAAS._started) return;
+  WAAS._started = true;
+
+  async function waitForWA(maxMs = 180000) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < maxMs) {
+      try {
+        if (WAAS.wa.hasLoader()) {
+          const CC = WAAS.wa.ns("WAWebChatCollection");
+          if (CC && CC.ChatCollection) return Date.now() - t0;
+        }
+      } catch (e) { /* aún cargando */ }
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    throw new Error("WhatsApp Web no terminó de cargar en 3 minutos (¿sesión cerrada o código cambiado?)");
+  }
+
+  (async () => {
+    try {
+      WAAS.mountUI(); // el botón aparece aunque WA no esté listo, para poder guardar el registro
+    } catch (e) {
+      WAAS.error("ui:error-montaje", e);
+    }
+    try {
+      const ms = await waitForWA();
+      WAAS.info("wa:listo", { ms });
+      // Las opciones (AB props) de la cuenta llegan unos segundos después de cargar la interfaz.
+      await new Promise((r) => setTimeout(r, 8000));
+      await WAAS.wa.diagnose();
+    } catch (e) {
+      WAAS.error("wa:no-listo", e);
+    }
+  })();
+})();
